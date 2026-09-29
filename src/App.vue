@@ -1,38 +1,59 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
-const greetMsg = ref("");
-const name = ref("");
-
-async function greet() {
-  // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-  greetMsg.value = await invoke("greet", { name: name.value });
+interface AppInfo {
+  appName: string;
+  version: string;
+  operatingSystem: string;
+  architecture: string;
 }
+
+const appInfo = ref<AppInfo | null>(null)
+const errorMessage = ref("");
+
+async function loadAppInfo() {
+  try {
+    appInfo.value = await invoke<AppInfo>("get_app_info");
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+onMounted(loadAppInfo)
+
+
 </script>
 
 <template>
   <main class="container">
-    <h1>Welcome to Tauri + Vue</h1>
+    <h1>Larry API Client</h1>
 
-    <div class="row">
-      <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-      </a>
-      <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-      </a>
-      <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
-      </a>
-    </div>
-    <p>Click on the Tauri, Vite, and Vue logos to learn more.</p>
+    <section v-if="appInfo">
+      <h2>Diagnóstico da aplicação</h2>
 
-    <form class="row" @submit.prevent="greet">
-      <input id="greet-input" v-model="name" placeholder="Enter a name..." />
-      <button type="submit">Greet</button>
-    </form>
-    <p>{{ greetMsg }}</p>
+      <dl>
+        <dt>Nome</dt>
+        <dd>{{ appInfo.appName }}</dd>
+
+        <dt>Versão</dt>
+        <dd>{{ appInfo.version }}</dd>
+
+        <dt>Sistema operacional</dt>
+        <dd>{{ appInfo.operatingSystem }}</dd>
+
+        <dt>Arquitetura</dt>
+        <dd>{{ appInfo.architecture }}</dd>
+      </dl>
+    </section>
+
+    <p v-else-if="errorMessage">
+      Erro: {{ errorMessage }}
+    </p>
+
+    <p v-else>
+      Carregando informações...
+    </p>
   </main>
 </template>
 
@@ -44,7 +65,6 @@ async function greet() {
 .logo.vue:hover {
   filter: drop-shadow(0 0 2em #249b73);
 }
-
 </style>
 <style>
 :root {
@@ -123,6 +143,7 @@ button {
 button:hover {
   border-color: #396cd8;
 }
+
 button:active {
   border-color: #396cd8;
   background-color: #e8e8e8;
@@ -152,9 +173,9 @@ button {
     color: #ffffff;
     background-color: #0f0f0f98;
   }
+
   button:active {
     background-color: #0f0f0f69;
   }
 }
-
 </style>
