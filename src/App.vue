@@ -41,19 +41,28 @@ interface RequestDefinition {
   body: RequestBody | null;
 }
 
+const httpMethods = [
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+] as const;
+
 
 const appInfo = ref<AppInfo | null>(null)
 const errorMessage = ref("");
 
 const sampleRequest = ref<RequestDefinition | null>(null);
+const requestDraft = ref<RequestDefinition | null>(null);
 
-const sampleRequestJson = computed(() => {
-  if (!sampleRequest.value) {
-    return ""
+const requestDraftJson = computed(() => {
+  if (!requestDraft.value) {
+    return "";
   }
 
-  return JSON.stringify(sampleRequest.value, null, 2)
-})
+  return JSON.stringify(requestDraft.value, null, 2);
+});
 
 async function loadAppInfo() {
   try {
@@ -65,12 +74,48 @@ async function loadAppInfo() {
 
 async function loadSampleRequest() {
   try {
-    sampleRequest.value = await invoke<RequestDefinition>(
+    const request = await invoke<RequestDefinition>(
       "get_sample_request",
     );
+
+    sampleRequest.value = request;
+    requestDraft.value = structuredClone(request);
+
   } catch (error) {
     errorMessage.value = String(error)
   }
+}
+
+function addHeader() {
+  if (!requestDraft.value) {
+    return;
+  }
+
+  requestDraft.value.headers.push({
+    name: "",
+    value: "",
+    enabled: true,
+  })
+
+}
+
+function removeHeader(index: number) {
+  if (!requestDraft.value) {
+    return;
+  }
+
+  requestDraft.value.headers.splice(index, 1)
+
+}
+
+
+
+function resetRequest() {
+  if (!sampleRequest.value) {
+    return;
+  }
+
+  requestDraft.value = structuredClone(sampleRequest.value);
 }
 
 onMounted(async () => {
@@ -103,15 +148,65 @@ onMounted(async () => {
       </dl>
     </section>
 
-    <section v-if="sampleRequest">
-      <h2>Requisição de exemplo</h2>
+    <section v-if="requestDraft">
+      <h2>Editor de requisição</h2>
 
-      <p>
-        <strong>{{ sampleRequest.method }}</strong>
-        {{ sampleRequest.url }}
-      </p>
+      <section class="headers-section">
+        <div class="section-heading">
+          <h3>Headers</h3>
 
-      <pre>{{ sampleRequestJson }}</pre>
+          <button type="button" @click="addHeader">
+            Adicionar header
+          </button>
+        </div>
+
+        <div v-for="(header, index) in requestDraft.headers" :key="index" class="header-row">
+          <input v-model="header.enabled" type="checkbox" :aria-label="`Habilitar header ${index + 1}`" />
+          <input v-model="header.name" type="text" placeholder="Nome" :aria-label="`Nome do header ${index + 1}`" />
+          <input v-model="header.value" type="text" placeholder="Valor" :aria-label="`Valor do header ${index + 1}`" />
+
+          <button type="button" @click="removeHeader(index)">
+            Remover
+          </button>
+
+        </div>
+
+        <p v-if="requestDraft.headers.length === 0">
+          Nenhum header configurado.
+        </p>
+      </section>
+
+      <form @submit.prevent>
+        <label>
+          Nome
+
+          <input v-model="requestDraft.name" type="text" />
+        </label>
+
+        <label>
+          Método
+
+          <select v-model="requestDraft.method">
+            <option v-for="method in httpMethods" :key="method" :value="method">
+              {{ method }}
+            </option>
+          </select>
+        </label>
+
+        <label>
+          URL
+
+          <input v-model="requestDraft.url" type="url" />
+        </label>
+
+        <button type="button" @click="resetRequest">
+          Restaurar exemplo
+        </button>
+      </form>
+
+      <h3>Preview da requisição</h3>
+
+      <pre>{{ requestDraftJson }}</pre>
     </section>
 
     <p v-else-if="errorMessage">
@@ -170,6 +265,32 @@ onMounted(async () => {
   filter: drop-shadow(0 0 2em #24c8db);
 }
 
+.header-section {
+  max-width: 800px;
+  margin: 24px auto;
+  text-align: left;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px
+}
+
+.header-row {
+  display: grid;
+  grid-template-columns: auto 1fr 2fr auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.header-row input[type="checkbox"] {
+  width: auto;
+}
+
+
 .row {
   display: flex;
   justify-content: center;
@@ -187,6 +308,28 @@ a:hover {
 
 h1 {
   text-align: center;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 800px;
+  margin: 0 auto 24px;
+  text-align: left;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+input,
+select {
+  padding: 8px;
+  border: 1px solid #999;
+  border-radius: 6px;
 }
 
 input,
