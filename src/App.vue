@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 interface AppInfo {
@@ -9,8 +9,51 @@ interface AppInfo {
   architecture: string;
 }
 
+interface HeaderEntry {
+  name: string;
+  value: string;
+  enabled: boolean;
+}
+
+interface QueryParam {
+  name: string;
+  value: string;
+  enabled: boolean;
+}
+
+type RequestBody =
+  | {
+    type: "json";
+    value: unknown;
+  }
+  | {
+    type: "text";
+    value: string
+  };
+
+interface RequestDefinition {
+  id: string;
+  name: string;
+  method: string;
+  url: string;
+  query: QueryParam[];
+  headers: HeaderEntry[];
+  body: RequestBody | null;
+}
+
+
 const appInfo = ref<AppInfo | null>(null)
 const errorMessage = ref("");
+
+const sampleRequest = ref<RequestDefinition | null>(null);
+
+const sampleRequestJson = computed(() => {
+  if (!sampleRequest.value) {
+    return ""
+  }
+
+  return JSON.stringify(sampleRequest.value, null, 2)
+})
 
 async function loadAppInfo() {
   try {
@@ -20,7 +63,20 @@ async function loadAppInfo() {
   }
 }
 
-onMounted(loadAppInfo)
+async function loadSampleRequest() {
+  try {
+    sampleRequest.value = await invoke<RequestDefinition>(
+      "get_sample_request",
+    );
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+onMounted(async () => {
+  await loadAppInfo();
+  await loadSampleRequest();
+})
 
 
 </script>
@@ -45,6 +101,17 @@ onMounted(loadAppInfo)
         <dt>Arquitetura</dt>
         <dd>{{ appInfo.architecture }}</dd>
       </dl>
+    </section>
+
+    <section v-if="sampleRequest">
+      <h2>Requisição de exemplo</h2>
+
+      <p>
+        <strong>{{ sampleRequest.method }}</strong>
+        {{ sampleRequest.url }}
+      </p>
+
+      <pre>{{ sampleRequestJson }}</pre>
     </section>
 
     <p v-else-if="errorMessage">
