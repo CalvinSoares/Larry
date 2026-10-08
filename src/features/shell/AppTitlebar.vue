@@ -3,7 +3,8 @@ import { onMounted, ref } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 defineProps<{
-  isExecuting: boolean;
+  environmentName: string;
+  requestName: string;
 }>();
 
 type TauriWindow = ReturnType<typeof getCurrentWindow>;
@@ -87,34 +88,22 @@ onMounted(refreshMaximizedState);
     @dblclick="toggleMaximize"
     @mousedown="startDragging"
   >
-    <div class="titlebar-left">
-      <button class="titlebar-icon-button" type="button" aria-label="Navegação" title="Navegação" @mousedown.stop>
-        <span class="menu-glyph" aria-hidden="true"></span>
-      </button>
-      <button class="titlebar-icon-button" type="button" aria-label="Início" title="Início" @mousedown.stop>
-        <svg class="home-glyph" viewBox="0 0 16 16" aria-hidden="true">
-          <path d="m2.5 7.2 5.5-4.5 5.5 4.5v5.3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V7.2Z" />
-          <path d="M6 13.5V9.2h4v4.3" />
-        </svg>
-      </button>
-      <span class="workspace-switcher" title="Workspace local">
-        <span>My Workspace</span>
-        <svg class="chevron-glyph" viewBox="0 0 16 16" aria-hidden="true">
-          <path d="m4 6 4 4 4-4" />
-        </svg>
-      </span>
+    <div class="titlebar-brand">
+      <img class="brand-mark" src="/assets/larry-platypus.png" alt="" />
+      <div>
+        <strong>Larry</strong>
+        <span>Local workbench</span>
+      </div>
     </div>
 
-    <div class="titlebar-brand">
-      <img class="brand-mark" src="/assets/larry-platypus.png" alt="Larry" />
-      <strong>Larry</strong>
+    <div class="titlebar-route" :title="`Minha API / ${requestName}`">
+      <span>Minha API</span>
+      <span class="route-separator" aria-hidden="true">/</span>
+      <strong>{{ requestName }}</strong>
     </div>
 
     <div class="titlebar-right" @mousedown.stop @dblclick.stop>
-      <span class="titlebar-context">Workspace local</span>
-      <span class="titlebar-divider" aria-hidden="true"></span>
-      <span v-if="isExecuting" class="app-status">Executando</span>
-      <span v-else class="app-status app-status-idle">Pronto</span>
+      <span class="titlebar-context">{{ environmentName || "Sem environment" }}</span>
       <button class="window-button" type="button" aria-label="Minimizar janela" title="Minimizar" @click="minimizeWindow">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10" /></svg>
       </button>
@@ -132,17 +121,16 @@ onMounted(refreshMaximizedState);
 <style scoped>
 .titlebar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(176px, 0.7fr) minmax(0, 1fr) minmax(176px, 0.7fr);
   align-items: center;
   min-height: 48px;
   margin: 0;
-  padding: 0 32px;
+  padding: 0 20px;
   border-bottom: 1px solid var(--color-border);
   color: var(--color-text-muted);
   user-select: none;
 }
 
-.titlebar-left,
 .titlebar-brand,
 .titlebar-right {
   display: flex;
@@ -150,19 +138,51 @@ onMounted(refreshMaximizedState);
   gap: 9px;
 }
 
-.titlebar-left {
+.titlebar-brand {
+  gap: 8px;
   min-width: 0;
 }
 
-.titlebar-brand {
-  justify-self: center;
-  gap: 7px;
-}
-
-.titlebar-brand strong {
+.titlebar-brand strong,
+.titlebar-route strong {
+  display: block;
   color: var(--color-text);
   font-size: 14px;
   line-height: 1.1;
+}
+
+.titlebar-brand span {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.titlebar-route {
+  display: flex;
+  justify-self: center;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titlebar-route strong {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: inherit;
+  text-overflow: ellipsis;
+}
+
+.route-separator {
+  margin: 0 8px;
+  color: var(--color-text-subtle);
 }
 
 .titlebar-right {
@@ -175,28 +195,6 @@ onMounted(refreshMaximizedState);
   font-size: 12px;
 }
 
-.app-status {
-  border-radius: 999px;
-  padding: 5px 10px;
-  color: var(--color-brand);
-  background: #163238;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.app-status-idle {
-  color: var(--color-text-muted);
-  background: var(--color-surface-2);
-}
-
-.titlebar-divider {
-  width: 1px;
-  height: 16px;
-  margin: 0 3px;
-  background: var(--color-border);
-}
-
-.titlebar-icon-button,
 .window-button {
   display: inline-flex;
   align-items: center;
@@ -210,10 +208,9 @@ onMounted(refreshMaximizedState);
   cursor: pointer;
 }
 
-.titlebar-icon-button:hover,
 .window-button:hover {
-  color: var(--color-text);
-  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  background: transparent;
 }
 
 .window-button-close:hover {
@@ -221,25 +218,6 @@ onMounted(refreshMaximizedState);
   background: #b63f4c;
 }
 
-.menu-glyph {
-  position: relative;
-  width: 14px;
-  height: 10px;
-  border-top: 1px solid currentColor;
-  border-bottom: 1px solid currentColor;
-}
-
-.menu-glyph::after {
-  position: absolute;
-  top: 4px;
-  right: 0;
-  left: 0;
-  height: 1px;
-  background: currentColor;
-  content: "";
-}
-
-.home-glyph,
 .window-button svg {
   width: 16px;
   height: 16px;
@@ -251,61 +229,30 @@ onMounted(refreshMaximizedState);
 }
 
 .brand-mark {
-  width: 30px;
-  height: 30px;
-  border-radius: 7px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
   object-fit: cover;
-}
-
-.workspace-switcher {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  color: var(--color-text);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.chevron-glyph {
-  width: 14px;
-  height: 14px;
-  color: var(--color-text-subtle);
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.2;
 }
 
 @media (max-width: 720px) {
   .titlebar {
     grid-template-columns: minmax(0, 1fr) auto;
-    padding-right: 20px;
-    padding-left: 20px;
+    padding: 0 14px;
   }
 
-  .titlebar-brand {
+  .titlebar-route {
     display: none;
   }
 
-  .titlebar-context,
-  .titlebar-divider {
+  .titlebar-context {
     display: none;
   }
 }
 
 @media (max-width: 440px) {
   .titlebar {
-    padding-right: 12px;
-    padding-left: 12px;
-  }
-
-  .workspace-switcher {
-    max-width: 140px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    padding: 0 10px;
   }
 }
 </style>

@@ -2,23 +2,34 @@
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 type ModalVariant = "neutral" | "info" | "danger" | "error";
+type ModalSize = "regular" | "wide";
 
 const props = withDefaults(
   defineProps<{
     open: boolean;
     title: string;
+    kicker?: string;
     description?: string;
     variant?: ModalVariant;
     primaryLabel?: string;
+    primaryDisabled?: boolean;
     secondaryLabel?: string;
+    secondaryDisabled?: boolean;
     closeOnBackdrop?: boolean;
+    keepMounted?: boolean;
+    size?: ModalSize;
   }>(),
   {
+    kicker: "",
     description: "",
     variant: "neutral",
     primaryLabel: "Confirmar",
+    primaryDisabled: false,
     secondaryLabel: "Cancelar",
+    secondaryDisabled: false,
     closeOnBackdrop: true,
+    keepMounted: false,
+    size: "regular",
   },
 );
 
@@ -114,18 +125,24 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body">
-    <div v-if="props.open" class="modal-backdrop" @mousedown.self="handleBackdrop">
+    <div
+      v-if="props.open || props.keepMounted"
+      v-show="props.open"
+      class="modal-backdrop"
+      :aria-hidden="props.open ? undefined : 'true'"
+      @mousedown.self="handleBackdrop"
+    >
       <section
         ref="modalElement"
         class="app-modal"
-        :class="`app-modal-${props.variant}`"
+        :class="[`app-modal-${props.variant}`, `app-modal-size-${props.size}`]"
         role="dialog"
         aria-modal="true"
         :aria-labelledby="`${props.title.replace(/\s+/g, '-').toLowerCase()}-title`"
         @keydown="handleKeydown"
       >
         <header class="modal-header">
-          <span class="modal-kicker">{{ props.variant === "danger" ? "CONFIRMAÇÃO" : "ATENÇÃO" }}</span>
+          <span class="modal-kicker">{{ props.kicker || (props.variant === "danger" ? "CONFIRMAÇÃO" : "ATENÇÃO") }}</span>
           <button class="modal-close" type="button" aria-label="Fechar modal" title="Fechar" @click="closeModal">
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="m4 4 8 8M12 4l-8 8" />
@@ -147,6 +164,7 @@ onBeforeUnmount(() => {
             ref="secondaryButton"
             class="modal-button modal-button-secondary"
             type="button"
+            :disabled="props.secondaryDisabled"
             @click="closeModal"
           >
             {{ props.secondaryLabel }}
@@ -155,6 +173,7 @@ onBeforeUnmount(() => {
             class="modal-button modal-button-primary"
             :class="{ 'modal-button-danger': props.variant === 'danger' }"
             type="button"
+            :disabled="props.primaryDisabled"
             @click="emit('confirm')"
           >
             {{ props.primaryLabel }}
@@ -185,6 +204,10 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   background: var(--color-surface-1);
   box-shadow: 0 18px 48px rgb(0 0 0 / 36%);
+}
+
+.app-modal-size-wide {
+  width: min(720px, 100%);
 }
 
 .modal-header,
@@ -278,9 +301,15 @@ onBeforeUnmount(() => {
   font: inherit;
 }
 
-.modal-button:hover {
-  border-color: var(--color-brand);
-  background: var(--color-surface-3);
+.modal-button:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.modal-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .modal-button-primary {
@@ -290,14 +319,21 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
+.modal-button-primary:hover:not(:disabled) {
+  border-color: var(--color-brand-strong);
+  color: #071315;
+  background: var(--color-brand);
+}
+
 .modal-button-danger {
   border-color: #b8545e;
   color: #fff;
   background: #8f3541;
 }
 
-.modal-button-danger:hover {
+.modal-button-danger:hover:not(:disabled) {
   border-color: #ef8585;
+  color: #fff;
   background: #a8404d;
 }
 

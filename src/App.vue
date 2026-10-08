@@ -3,18 +3,25 @@ import { computed, onMounted, ref } from "vue";
 
 import RequestEditor from "./features/request-editor/RequestEditor.vue";
 import ResponseViewer from "./features/response-viewer/ResponseViewer.vue";
-import CollectionManager from "./features/collections/CollectionManager.vue";
-import CollectionSidebar from "./features/collections/CollectionSidebar.vue";
 import AppTitlebar from "./features/shell/AppTitlebar.vue";
+import WorkspaceRail from "./features/shell/WorkspaceRail.vue";
+import WelcomeModal from "./features/onboarding/WelcomeModal.vue";
+import PostmanImportModal from "./features/onboarding/PostmanImportModal.vue";
 import {
   executeRequest,
+  compareHistoryEntries,
+  getHistoryEntry,
   getAppInfo,
   getSampleRequest,
+  listHistory,
 } from "./services/ipc";
 import { formatIpcError } from "./services/errors";
 import type {
   AppInfo,
   CollectionFile,
+  EnvironmentFile,
+  HistoryComparison,
+  HistorySummary,
   HttpResponse,
   RequestDefinition,
 } from "./types/api";
@@ -29,9 +36,39 @@ const isExecuting = ref(false);
 const errorMessage = ref("");
 const editorError = ref("");
 const resetToken = ref(0);
+const isWelcomeOpen = ref(false);
+const isPostmanImportOpen = ref(false);
+const activeEnvironment = ref<EnvironmentFile | null>(null);
+const historyEntries = ref<HistorySummary[]>([]);
+const historyComparison = ref<HistoryComparison | null>(null);
+const isHistoryLoading = ref(false);
+
+const ONBOARDING_STORAGE_KEY = "larry.onboarding.completed";
 
 function cloneRequest(request: RequestDefinition) {
   return JSON.parse(JSON.stringify(request)) as RequestDefinition;
+}
+
+function cloneEnvironment(environment: EnvironmentFile) {
+  return JSON.parse(JSON.stringify(environment)) as EnvironmentFile;
+}
+
+function hasCompletedOnboarding() {
+  try {
+    return window.localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function completeOnboarding() {
+  try {
+    window.localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+  } catch {
+    // A sessão continua funcionando mesmo sem persistência do navegador.
+  }
+
+  isWelcomeOpen.value = false;
 }
 
 const requestDraftJson = computed(() => {
@@ -54,8 +91,21 @@ async function loadApplication() {
     requestDraft.value = cloneRequest(loadedRequest);
     collectionRequests.value = [cloneRequest(loadedRequest)];
     activeRequestId.value = loadedRequest.id;
+    await refreshHistory();
   } catch (error) {
     errorMessage.value = formatIpcError(error);
+  }
+}
+
+async function refreshHistory() {
+  isHistoryLoading.value = true;
+
+  try {
+    historyEntries.value = await listHistory(20);
+  } catch {
+    historyEntries.value = [];
+  } finally {
+    isHistoryLoading.value = false;
   }
 }
 
@@ -111,6 +161,11 @@ function selectCollectionRequest(requestId: string) {
 }
 
 function loadCollection(collection: CollectionFile) {
+  if (collection.requests.length === 0) {
+    errorMessage.value = "A collection não possui requests executáveis para abrir.";
+    return;
+  }
+
   collectionRequests.value = collection.requests.map(cloneRequest);
   selectCollectionRequest(collectionRequests.value[0].id);
 }
@@ -135,6 +190,65 @@ function addCollectionRequest() {
   const request = createNewRequest();
   collectionRequests.value.push(request);
   selectCollectionRequest(request.id);
+}
+
+function renameCollectionRequest(requestId: string, requestedName: string) {
+  const name = requestedName.trim();
+  const requestIndex = collectionRequests.value.findIndex((item) => item.id === requestId);
+
+  if (!name || requestIndex < 0) {
+    return;
+  }
+
+  const renamedRequest = {
+    ...collectionRequests.value[requestIndex],
+    name,
+  };
+
+  collectionRequests.value[requestIndex] = cloneRequest(renamedRequest);
+
+  if (requestDraft.value?.id === requestId) {
+    requestDraft.value = cloneRequest(renamedRequest);
+    resetToken.value += 1;
+  }
+}
+
+function startFreshRequest(name: string) {
+  const request = createNewRequest(name);
+  requestDraft.value = cloneRequest(request);
+  collectionRequests.value = [cloneRequest(request)];
+  activeRequestId.value = request.id;
+  response.value = null;
+  editorError.value = "";
+  resetToken.value += 1;
+}
+
+function openPostmanImport() {
+  isWelcomeOpen.value = false;
+  isPostmanImportOpen.value = true;
+}
+
+function closePostmanImport() {
+  isPostmanImportOpen.value = false;
+
+  if (!hasCompletedOnboarding()) {
+    isWelcomeOpen.value = true;
+  }
+}
+
+function handlePostmanImported(collection: CollectionFile) {
+  if (collection.requests.length === 0) {
+    errorMessage.value = "A prévia Postman não possui requests executáveis para importar.";
+    return;
+  }
+
+  loadCollection(collection);
+  isPostmanImportOpen.value = false;
+  completeOnboarding();
+}
+
+function updateEnvironment(environment: EnvironmentFile | null) {
+  activeEnvironment.value = environment ? cloneEnvironment(environment) : null;
 }
 
 function duplicateCollectionRequest(requestId: string) {
@@ -174,62 +288,94 @@ async function runRequest() {
   response.value = null;
 
   try {
-    response.value = await executeRequest(requestDraft.value);
+    response.value = await executeRequest(requestDraft.value, activeEnvironment.value);
   } catch (error) {
     editorError.value = formatIpcError(error);
   } finally {
     isExecuting.value = false;
+    await refreshHistory();
   }
 }
 
-onMounted(loadApplication);
+async function replayHistory(id: string) {
+  try {
+    const entry = await getHistoryEntry(id);
+    updateRequest(cloneRequest(entry.request));
+    response.value = entry.response;
+    historyComparison.value = null;
+    editorError.value = entry.errorMessage ?? "";
+  } catch (error) {
+    editorError.value = formatIpcError(error);
+  }
+}
+
+async function compareHistory(leftId: string, rightId: string) {
+  try {
+    historyComparison.value = await compareHistoryEntries(leftId, rightId);
+  } catch (error) {
+    editorError.value = formatIpcError(error);
+  }
+}
+
+onMounted(async () => {
+  await loadApplication();
+
+  if (requestDraft.value && !hasCompletedOnboarding()) {
+    isWelcomeOpen.value = true;
+  }
+});
 </script>
 
 <template>
+  <WelcomeModal
+    :open="isWelcomeOpen"
+    @close="isWelcomeOpen = false"
+    @import-postman="openPostmanImport"
+    @create-collection="completeOnboarding(); startFreshRequest('Nova collection')"
+    @start-request="completeOnboarding(); startFreshRequest('Primeira request')"
+    @explore="completeOnboarding"
+  />
+
+  <PostmanImportModal
+    :open="isPostmanImportOpen"
+    @close="closePostmanImport"
+    @imported="handlePostmanImported"
+  />
+
   <main class="app-shell">
-    <AppTitlebar :is-executing="isExecuting" />
-
-    <section class="workspace-heading">
-      <div>
-        <p class="eyebrow">REQUEST WORKSPACE</p>
-        <h1>Teste e investigue APIs localmente</h1>
-        <p class="subtitle">Configure a chamada, execute e leia o resultado técnico.</p>
-      </div>
-
-      <span class="local-badge">Local first</span>
-    </section>
-
-    <section v-if="appInfo" class="diagnostic-strip">
-      <span>{{ appInfo.appName }} {{ appInfo.version }}</span>
-      <span>{{ appInfo.operatingSystem }} · {{ appInfo.architecture }}</span>
-    </section>
+    <AppTitlebar
+      :environment-name="activeEnvironment?.name ?? ''"
+      :request-name="requestDraft?.name ?? 'Carregando request'"
+    />
 
     <p v-if="errorMessage" class="global-error">{{ errorMessage }}</p>
 
     <section v-if="requestDraft" class="workspace">
-      <aside class="panel sidebar-panel">
-        <CollectionSidebar
-          :requests="collectionRequests"
-          :active-request-id="activeRequestId"
-          @select-request="selectCollectionRequest"
-          @add-request="addCollectionRequest"
-          @duplicate-request="duplicateCollectionRequest"
-          @remove-request="removeCollectionRequest"
-        />
-
-        <CollectionManager
-          :requests="collectionRequests"
-          @loaded-collection="loadCollection"
-        />
-      </aside>
+      <WorkspaceRail
+        :requests="collectionRequests"
+        :active-request-id="activeRequestId"
+        :history-entries="historyEntries"
+        :history-comparison="historyComparison"
+        :is-history-loading="isHistoryLoading"
+        @select-request="selectCollectionRequest"
+        @add-request="addCollectionRequest"
+        @rename-request="renameCollectionRequest"
+        @duplicate-request="duplicateCollectionRequest"
+        @remove-request="removeCollectionRequest"
+        @loaded-collection="loadCollection"
+        @environment-changed="updateEnvironment"
+        @refresh-history="refreshHistory"
+        @replay-history="replayHistory"
+        @compare-history="compareHistory"
+      />
 
       <article class="panel request-panel">
         <div class="panel-heading">
           <div>
-            <p class="eyebrow">ACTIVE REQUEST</p>
-            <h2>Editor de request</h2>
+            <p class="eyebrow">COMPOSER</p>
+            <h1>{{ requestDraft.name }}</h1>
           </div>
-          <span class="panel-state">Editável</span>
+          <span class="panel-state">HTTP request</span>
         </div>
 
         <RequestEditor
@@ -256,6 +402,13 @@ onMounted(loadApplication);
     </section>
 
     <p v-else-if="!errorMessage" class="loading-state">Carregando workspace...</p>
+
+    <footer v-if="appInfo" class="app-statusbar">
+      <span>Local first</span>
+      <span>Core HTTP</span>
+      <span>{{ appInfo.appName }} {{ appInfo.version }}</span>
+      <span class="statusbar-platform">{{ appInfo.operatingSystem }} · {{ appInfo.architecture }}</span>
+    </footer>
   </main>
 </template>
 
@@ -322,20 +475,11 @@ textarea {
   overflow: hidden;
 }
 
-.workspace-heading,
-.diagnostic-strip,
 .panel-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-}
-
-.workspace-heading {
-  flex: 0 0 auto;
-  align-items: flex-end;
-  margin: 0;
-  padding: 18px 20px 12px;
+  gap: 16px;
 }
 
 .eyebrow {
@@ -354,10 +498,10 @@ p {
 }
 
 h1 {
-  margin-bottom: 6px;
+  margin-bottom: 0;
   color: var(--color-text);
-  font-size: clamp(24px, 4vw, 32px);
-  letter-spacing: -0.03em;
+  font-size: 18px;
+  letter-spacing: -0.015em;
 }
 
 h2 {
@@ -366,45 +510,8 @@ h2 {
   font-size: 20px;
 }
 
-.subtitle {
-  margin-bottom: 0;
-  color: var(--color-text-muted);
-}
-
-.app-status,
-.local-badge {
-  border-radius: 999px;
-  padding: 5px 10px;
-  color: var(--color-brand);
-  background: #163238;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.local-badge {
-  color: var(--color-success);
-  background: #163329;
-}
-
-.app-status-idle {
-  color: var(--color-text-muted);
-  background: var(--color-surface-2);
-}
-
 .panel-state {
   color: var(--color-text-muted);
-  font-size: 12px;
-}
-
-.diagnostic-strip {
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  margin: 0 20px 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 5px;
-  color: var(--color-text-muted);
-  background: var(--color-surface-1);
   font-size: 12px;
 }
 
@@ -413,44 +520,42 @@ h2 {
   min-width: 0;
   min-height: 0;
   flex: 1 1 auto;
-  grid-template-columns: 260px minmax(420px, 1.15fr) minmax(320px, 0.85fr);
+  grid-template-columns: 252px minmax(400px, 1.15fr) minmax(340px, 0.85fr);
   overflow: hidden;
 }
 
 .panel,
+.workspace > .workspace-rail,
 .workspace > .response-viewer {
   min-width: 0;
   min-height: 0;
   border-radius: 0;
 }
 
+.panel {
+  overflow-y: auto;
+  border: 0;
+  background: var(--color-surface-1);
+}
+
+.workspace > .workspace-rail {
+  border-right: 1px solid var(--color-border);
+}
+
 .workspace > .response-viewer {
   border-left: 1px solid var(--color-border);
 }
 
-.panel {
-  overflow-y: auto;
-  border: 0;
-  border-right: 1px solid var(--color-border);
-  background: var(--color-surface-1);
-}
-
-.sidebar-panel {
-  background: #12151a;
-}
-
 .request-panel {
   overflow-y: auto;
-  padding: 16px 20px 32px;
-}
-
-.sidebar-panel .collection-manager {
-  margin: 0;
-  padding: 16px;
+  padding: 16px 20px 28px;
 }
 
 .panel-heading {
-  margin-bottom: 18px;
+  min-height: 42px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 12px;
 }
 
 .request-preview {
@@ -496,6 +601,29 @@ pre {
   color: var(--color-text-muted);
 }
 
+.app-statusbar {
+  display: flex;
+  flex: 0 0 28px;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 0 16px;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-subtle);
+  background: #101318;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.statusbar-platform {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 button,
 input,
 select,
@@ -524,6 +652,10 @@ summary:focus-visible {
     border-left: 0;
     border-top: 1px solid var(--color-border);
   }
+
+  .workspace > .workspace-rail {
+    grid-row: 1 / -1;
+  }
 }
 
 @media (max-width: 900px) {
@@ -540,34 +672,34 @@ summary:focus-visible {
     border-top: 1px solid var(--color-border);
   }
 
-  .sidebar-panel {
+  .workspace > .workspace-rail {
+    grid-row: auto;
     max-height: 320px;
   }
 
   .request-panel {
-    border-right: 0;
+    border-top: 1px solid var(--color-border);
   }
 }
 
 @media (max-width: 520px) {
-  .workspace-heading,
   .panel-heading {
     align-items: flex-start;
     flex-direction: column;
     gap: 10px;
   }
 
-  .workspace-heading {
-    padding: 14px 12px 10px;
-  }
-
-  .diagnostic-strip {
-    margin-right: 12px;
-    margin-left: 12px;
-  }
-
   .request-panel {
     padding: 14px 12px 24px;
+  }
+
+  .app-statusbar {
+    gap: 8px;
+    padding: 0 10px;
+  }
+
+  .app-statusbar span:nth-child(3) {
+    display: none;
   }
 }
 </style>
