@@ -1,4 +1,4 @@
-# PLAN — arquitetura e roadmap
+# PLAN: arquitetura e roadmap
 
 ## 1. Objetivo
 
@@ -102,7 +102,6 @@ src/
     replay-compare/
     performance/
     protocol-lab/
-    learning/
   types/
 ```
 
@@ -408,7 +407,7 @@ Limitações deliberadas: o histórico atual mantém um resumo de comparação, 
 - MQTT;
 - proxy/MITM;
 - packet capture/ETW;
-- diagnóstico assistido por IA baseado em evidências.
+- diagnóstico baseado em evidências.
 
 ## 7. Fases de implementação
 
@@ -429,5 +428,5 @@ Limitações deliberadas: o histórico atual mantém um resumo de comparação, 
 15. Protocol Lab e modo educacional.
 16. Hardening e distribuição.
 
-Cada fase pode ser entregue em um ou mais lotes de implementação. O detalhamento pedagógico e o formato do relatório final estão em [LEARNING.md](./LEARNING.md).
+Cada fase pode ser entregue em um ou mais lotes de implementação. O formato do relatório final e os critérios de validação ficam neste plano e no checklist do projeto.
 

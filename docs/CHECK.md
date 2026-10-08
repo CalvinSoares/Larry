@@ -1,4 +1,4 @@
-# CHECK — mercado e viabilidade
+# CHECK: mercado e viabilidade
 
 **Data:** 2026-09-29
 

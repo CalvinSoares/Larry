@@ -75,7 +75,3 @@ feat: add local environment persistence
 fix: preserve DNS diagnostic details
 docs: explain collection schema versioning
 ```
-
-## Uso de ferramentas de IA
-
-Contribuições assistidas por IA são aceitas. A pessoa que abre o Pull Request continua responsável por entender, testar, revisar segurança e explicar todo o código enviado. Nunca forneça secrets ou dados privados a ferramentas de IA.

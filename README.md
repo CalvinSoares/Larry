@@ -81,7 +81,6 @@ Comece pelo [índice de documentação](docs/README.md).
 - [Formato das collections](docs/collection-format.md)
 - [Segurança](docs/security.md)
 - [Plano e roadmap](docs/roadmap.md)
-- [Aprendizado guiado](docs/LEARNING.md)
 
 ## Contribuição
 
