@@ -69,10 +69,7 @@ mod tests {
 
         assert_eq!(serialized["method"], "POST");
         assert_eq!(serialized["name"], "Criar pagamento");
-        assert_eq!(
-            serialized["body"]["type"],
-            "json"
-        );
+        assert_eq!(serialized["body"]["type"], "json");
         assert_eq!(serialized["body"]["value"]["amount"], 100);
     }
 }
