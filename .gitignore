@@ -12,9 +12,9 @@ dist
 dist-ssr
 *.local
 
-# Projeto local: a documentação de trabalho fica fora do versionamento.
-# AGENTS.md permanece versionável e não é ignorado.
-docs/
+# Documentação pública é parte do produto e deve ser versionada.
+# Use docs/internal/ somente para anotações locais que não devem ir ao repositório.
+docs/internal/
 
 # Artefatos de ícones mobile gerados pelo Tauri não fazem parte do MVP desktop.
 src-tauri/icons/android/
