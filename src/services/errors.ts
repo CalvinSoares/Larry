@@ -11,9 +11,23 @@ export function formatIpcError(value: unknown): string {
     const record = value as Record<string, unknown>;
     const kind = typeof record.kind === "string" ? record.kind : "";
     const message = typeof record.message === "string" ? record.message : "";
+    const diagnostic = record.diagnostic as Record<string, unknown> | undefined;
+    const diagnosticSummary =
+      diagnostic && typeof diagnostic.summary === "string"
+        ? diagnostic.summary
+        : "";
+    const diagnosticLayer =
+      diagnostic && typeof diagnostic.layer === "string" ? diagnostic.layer : "";
+    const diagnosticTechnical =
+      diagnostic && typeof diagnostic.technical === "string"
+        ? diagnostic.technical
+        : "";
+    const diagnosticText = diagnosticSummary
+      ? ` Camada: ${diagnosticLayer || "desconhecida"}. ${diagnosticSummary}${diagnosticTechnical ? ` (${diagnosticTechnical})` : ""}`
+      : "";
 
     if (kind && message) {
-      return `[${kind}] ${message}`;
+      return `[${kind}] ${message}${diagnosticText}`;
     }
 
     if (message) {
