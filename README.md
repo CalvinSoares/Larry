@@ -16,6 +16,13 @@ O Larry está sendo construído para manter o frontend simples e separar a inter
 - criação, duplicação, seleção e remoção de requests locais;
 - salvar e carregar collections YAML legíveis e versionáveis pelo Git;
 - inspeção read-only do branch, status e diff da collection no Git;
+- onboarding local de primeiro uso;
+- prévia de importação de collections Postman v2.1 com avisos e sanitização básica;
+- environments YAML separados das collections, com placeholders públicos e secret references;
+- secrets armazenados localmente pelo mecanismo nativo do sistema e nunca retornados para a UI;
+- trace HTTP inicial com DNS preflight, TTFB, download, total, IPs resolvidos e versão HTTP;
+- diagnóstico inicial por camada de aplicação para status HTTP e falhas de execução;
+- histórico local SQLite com replay sanitizado e comparação de execuções;
 - modal acessível para ações destrutivas, sem `window.alert`, `window.confirm` ou `window.prompt`;
 - execução local com Vue 3, TypeScript, Vite e Tauri 2;
 - interface sem backend obrigatório, login ou telemetria.
@@ -81,6 +88,7 @@ docs/            documentação de decisões e evolução do projeto
 - validar URLs, paths, tamanhos e permissões no Rust;
 - permitir cancelamento em operações de rede, streams e profiling;
 - manter collections, migrations e eventos versionados e legíveis fora do app;
+- manter secrets fora de collections, environments versionados, histórico, logs e exportações;
 - usar capabilities Tauri mínimas e específicas.
 
 ## Roadmap inicial
@@ -88,7 +96,7 @@ docs/            documentação de decisões e evolução do projeto
 - cancelamento de requests e tratamento de erro por camada;
 - collections importáveis e exportáveis;
 - persistência local versionada com SQLite e arquivos editáveis;
-- armazenamento seguro de credenciais pelo mecanismo nativo do sistema;
+- precedência de variables, detecção de secrets e seletor nativo de environments;
 - histórico de execuções com `run_id`, timestamp monotônico, fase, fonte e confiança;
 - cobertura de testes para caminho feliz, timeout, cancelamento e erro;
 - suporte progressivo a HTTP/2, streams e métricas com provenance.
