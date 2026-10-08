@@ -15,7 +15,6 @@ Esta pasta contém a documentação pública do projeto. Decisões que afetam us
 
 - [Plano de implementação](PLAN.md)
 - [Checklist de desenvolvimento](CHECK.md)
-- [Aprendizado guiado](LEARNING.md)
 
 ## Decisões
 

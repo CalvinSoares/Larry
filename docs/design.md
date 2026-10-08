@@ -1,4 +1,4 @@
-# Larry API Client — sistema visual
+# Larry API Client: sistema visual
 
 **Status:** reformulação de identidade e workspace em andamento
 **Data:** 2026-10-08
@@ -24,7 +24,7 @@ O Larry não deve parecer:
 - um dashboard genérico;
 - uma landing page dentro do aplicativo;
 - um produto SaaS que exige conta;
-- um assistente de IA decorado;
+- um assistente decorativo sem ação real;
 - uma cópia visual de Postman, Insomnia ou Bruno.
 
 ## 2. Referências observadas
@@ -155,7 +155,7 @@ Evitar:
 - texto genérico como `Algo deu errado` sem causa técnica;
 - copy com travessão longo ou hífen usado como decoração;
 - símbolos decorativos como setas soltas, estrelas ou sparkles;
-- promessas de IA que não correspondem a uma ação real.
+- promessas de automação que não correspondem a uma ação real.
 
 ## 4. Princípios visuais
 
@@ -468,7 +468,7 @@ Estrutura visual:
 
 No Tauri, a decoração nativa fica desativada para evitar uma faixa visual do Windows separada da identidade do Larry. A topbar web assume apenas arrastar, minimizar, maximizar/restaurar e fechar por meio das APIs de janela do Tauri. Nenhuma ação de sistema é simulada sem chamada real.
 
-Não colocar slogan, anúncio, chat ou ação de IA na topbar.
+Não colocar slogan, anúncio, chat ou ação sem função real na topbar.
 
 Não manter botões de menu, início ou busca que ainda não têm comportamento. Um controle visual sem efeito cria expectativa falsa e reduz a densidade útil.
 
@@ -710,7 +710,7 @@ Regras:
 - preferir um único conjunto de ícones lineares;
 - todos os ícones interativos têm label acessível e tooltip;
 - não usar emojis como ícones funcionais;
-- não usar sparkles, varinhas, estrelas ou brilhos para sugerir IA;
+- não usar sparkles, varinhas, estrelas ou brilhos como decoração funcional;
 - não misturar ícones filled e outline sem motivo;
 - não colocar ícone em todo texto só para preencher espaço.
 
@@ -731,7 +731,7 @@ O conjunto de ícones deve ser avaliado como sistema. Antes de adicionar um íco
 - emojis;
 - travessão longo em textos de interface;
 - frases de marketing na área de trabalho;
-- `magic`, `copilot`, `AI-powered` sem uma funcionalidade explícita;
+- nomes como `magic` ou `copilot` sem uma funcionalidade explícita;
 - textos que escondem erros técnicos;
 - excesso de exclamações;
 - botões com rótulos vagos como `Continuar` quando a ação pode ser nomeada.
