@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 
 import type {
   RequestBody,
@@ -28,11 +28,17 @@ const emit = defineEmits<{
 }>();
 
 const localRequest = ref<RequestDefinition>(cloneRequest(props.request));
-const bodyType = ref<"json" | "text">("json");
+const bodyType = ref<"json" | "text" | "none">("json");
 const bodyText = ref("");
 const bodyError = ref("");
+const isBodyMenuOpen = ref(false);
+const bodyEditor = ref<HTMLElement | null>(null);
+const bodyHighlight = ref<HTMLElement | null>(null);
+const bodyGutter = ref<HTMLElement | null>(null);
 type ComposerTab = "params" | "headers" | "body";
 const activeTab = ref<ComposerTab>("params");
+
+type BodyFormat = "multipart" | "form-urlencoded" | "json" | "xml" | "text" | "sparql" | "binary" | "none";
 
 const enabledParameterCount = computed(
   () => localRequest.value.query.filter((parameter) => parameter.enabled).length,
@@ -40,9 +46,115 @@ const enabledParameterCount = computed(
 const enabledHeaderCount = computed(
   () => localRequest.value.headers.filter((header) => header.enabled).length,
 );
+const bodyLineCount = computed(() => Math.max(1, bodyText.value.split("\n").length));
+const bodyFormatLabel = computed(() => {
+  if (bodyType.value === "json") {
+    return "JSON";
+  }
+
+  return bodyType.value === "text" ? "TEXT" : "No Body";
+});
 
 function cloneRequest(request: RequestDefinition) {
   return JSON.parse(JSON.stringify(request)) as RequestDefinition;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function highlightJson(value: string) {
+  const tokenPattern = /"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b/g;
+  let output = "";
+  let cursor = 0;
+
+  for (const match of value.matchAll(tokenPattern)) {
+    const token = match[0];
+    const index = match.index ?? 0;
+    const trailingText = value.slice(index + token.length);
+    const tokenClass = token.startsWith("\"")
+      ? /^\s*:/.test(trailingText)
+        ? "token-key"
+        : "token-string"
+      : /\d/.test(token)
+        ? "token-number"
+        : "token-literal";
+
+    output += escapeHtml(value.slice(cursor, index));
+    output += `<span class="${tokenClass}">${escapeHtml(token)}</span>`;
+    cursor = index + token.length;
+  }
+
+  return `${output}${escapeHtml(value.slice(cursor))}`;
+}
+
+const highlightedBody = computed(() => (
+  bodyType.value === "json" ? highlightJson(bodyText.value) : escapeHtml(bodyText.value)
+));
+
+function syncBodyScroll() {
+  if (!bodyEditor.value) {
+    return;
+  }
+
+  if (bodyHighlight.value) {
+    bodyHighlight.value.scrollTop = bodyEditor.value.scrollTop;
+    bodyHighlight.value.scrollLeft = bodyEditor.value.scrollLeft;
+  }
+
+  if (bodyGutter.value) {
+    bodyGutter.value.scrollTop = bodyEditor.value.scrollTop;
+  }
+}
+
+function syncBodyEditor() {
+  void nextTick(() => {
+    if (!bodyEditor.value) {
+      return;
+    }
+
+    if (bodyEditor.value.textContent !== bodyText.value) {
+      bodyEditor.value.textContent = bodyText.value;
+    }
+
+    syncBodyScroll();
+  });
+}
+
+function handleBodyInput(event: Event) {
+  const target = event.currentTarget as HTMLElement;
+  const nextBodyText = (target.innerText || target.textContent || "").replace(/\r\n/g, "\n");
+
+  if (bodyText.value !== nextBodyText) {
+    bodyText.value = nextBodyText;
+  }
+}
+
+function selectBodyFormat(format: BodyFormat) {
+  if (format !== "json" && format !== "text" && format !== "none") {
+    return;
+  }
+
+  bodyType.value = format;
+  isBodyMenuOpen.value = false;
+}
+
+function prettifyBody() {
+  if (bodyType.value !== "json" || !bodyText.value.trim()) {
+    return;
+  }
+
+  try {
+    bodyText.value = JSON.stringify(JSON.parse(bodyText.value), null, 2);
+    bodyError.value = "";
+  } catch {
+    bodyError.value = "JSON inválido. Corrija o conteúdo antes de executar.";
+  }
 }
 
 function loadBodyEditor(body: RequestBody | null) {
@@ -51,6 +163,7 @@ function loadBodyEditor(body: RequestBody | null) {
   if (!body) {
     bodyType.value = "json";
     bodyText.value = "";
+    syncBodyEditor();
     return;
   }
 
@@ -58,6 +171,7 @@ function loadBodyEditor(body: RequestBody | null) {
   bodyText.value = body.type === "json"
     ? JSON.stringify(body.value, null, 2)
     : body.value;
+  syncBodyEditor();
 }
 
 function addHeader() {
@@ -103,18 +217,28 @@ watch(
 );
 
 watch([bodyType, bodyText], () => {
+  if (bodyType.value === "none") {
+    localRequest.value.body = null;
+    bodyText.value = "";
+    bodyError.value = "";
+    syncBodyEditor();
+    return;
+  }
+
   if (bodyType.value === "text") {
     localRequest.value.body = {
       type: "text",
       value: bodyText.value,
     };
     bodyError.value = "";
+    syncBodyEditor();
     return;
   }
 
   if (!bodyText.value.trim()) {
     localRequest.value.body = null;
     bodyError.value = "";
+    syncBodyEditor();
     return;
   }
 
@@ -127,6 +251,14 @@ watch([bodyType, bodyText], () => {
   } catch {
     bodyError.value = "JSON inválido. Corrija o conteúdo antes de executar.";
   }
+
+  syncBodyEditor();
+});
+
+watch(activeTab, () => {
+  if (activeTab.value === "body") {
+    syncBodyEditor();
+  }
 });
 
 watch(
@@ -138,29 +270,31 @@ watch(
 );
 
 loadBodyEditor(localRequest.value.body);
+onMounted(syncBodyEditor);
 </script>
 
 <template>
   <form class="request-editor" @submit.prevent="handleSubmit">
-    <div class="request-line">
-      <label class="method-field">
-        <span>Método</span>
-        <span class="select-control">
-          <select v-model="localRequest.method">
-            <option v-for="method in httpMethods" :key="method" :value="method">
-              {{ method }}
-            </option>
-          </select>
-          <svg class="select-chevron" viewBox="0 0 16 16" aria-hidden="true">
-            <path d="m4 6 4 4 4-4" />
-          </svg>
-        </span>
-      </label>
+    <div class="request-bar" aria-label="Barra de requisição">
+      <span class="request-method-control select-control">
+        <select v-model="localRequest.method" class="request-method" aria-label="Método">
+          <option v-for="method in httpMethods" :key="method" :value="method">
+            {{ method }}
+          </option>
+        </select>
+        <svg class="select-chevron" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="m4 6 4 4 4-4" />
+        </svg>
+      </span>
 
-      <label class="url-field">
-        <span>URL</span>
-        <input v-model="localRequest.url" type="url" required />
-      </label>
+      <input
+        v-model="localRequest.url"
+        class="request-url"
+        type="url"
+        aria-label="URL"
+        placeholder="https://example.com"
+        required
+      />
 
       <button class="primary-action" type="submit" :disabled="props.isExecuting || Boolean(bodyError)">
         {{ props.isExecuting ? "Enviando..." : "Enviar" }}
@@ -210,19 +344,50 @@ loadBodyEditor(localRequest.value.body);
       role="tabpanel"
     >
       <div class="section-heading">
-        <div>
-          <h3>Query parameters</h3>
-          <p>Parâmetros habilitados serão adicionados à URL.</p>
-        </div>
-
+        <h3>Query</h3>
         <button type="button" @click="addQueryParam">Adicionar</button>
       </div>
 
-      <div v-for="(param, index) in localRequest.query" :key="index" class="pair-row">
-        <input v-model="param.enabled" type="checkbox" :aria-label="`Habilitar parâmetro ${index + 1}`" />
-        <input v-model="param.name" type="text" placeholder="Nome" :aria-label="`Nome do parâmetro ${index + 1}`" />
-        <input v-model="param.value" type="text" placeholder="Valor" :aria-label="`Valor do parâmetro ${index + 1}`" />
-        <button type="button" @click="removeQueryParam(index)">Remover</button>
+      <div class="params-table" role="table" aria-label="Parâmetros de query">
+        <div class="params-table-header" role="row">
+          <span role="columnheader" aria-label="Ativo"></span>
+          <span role="columnheader">Chave</span>
+          <span role="columnheader">Valor</span>
+          <span role="columnheader" aria-label="Ação"></span>
+        </div>
+
+        <div v-for="(param, index) in localRequest.query" :key="index" class="parameter-row" role="row">
+          <input
+            v-model="param.enabled"
+            type="checkbox"
+            :aria-label="`Habilitar parâmetro ${index + 1}`"
+          />
+          <input
+            v-model="param.name"
+            class="parameter-cell"
+            type="text"
+            placeholder="Nome"
+            :aria-label="`Nome do parâmetro ${index + 1}`"
+          />
+          <input
+            v-model="param.value"
+            class="parameter-cell"
+            type="text"
+            placeholder="Valor"
+            :aria-label="`Valor do parâmetro ${index + 1}`"
+          />
+          <button
+            class="icon-button"
+            type="button"
+            :aria-label="`Remover parâmetro ${index + 1}`"
+            :title="`Remover parâmetro ${index + 1}`"
+            @click="removeQueryParam(index)"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 5h10M6 5V3.5h4V5m-5.5 0 .6 8h5.8l.6-8M7 7.5v3.5m2-3.5v3.5" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <p v-if="localRequest.query.length === 0" class="muted">Nenhum parâmetro configurado.</p>
@@ -256,35 +421,168 @@ loadBodyEditor(localRequest.value.body);
     <section
       v-else
       id="request-body-panel"
-      class="editor-section"
+      class="editor-section body-editor-section"
       role="tabpanel"
+      @click="isBodyMenuOpen = false"
     >
-      <div class="section-heading">
-        <div>
-          <h3>Body</h3>
-          <p>O JSON precisa ser válido antes do envio.</p>
+      <div class="body-toolbar">
+        <div class="body-toolbar-context">
+          <span class="body-toolbar-mark" aria-hidden="true"></span>
+          <span class="body-toolbar-title">Request payload</span>
+          <span class="body-toolbar-state">local draft</span>
         </div>
 
-        <span class="select-control body-type-control">
-          <select v-model="bodyType" aria-label="Tipo do body">
-            <option value="json">JSON</option>
-            <option value="text">Texto</option>
-          </select>
-          <svg class="select-chevron" viewBox="0 0 16 16" aria-hidden="true">
-            <path d="m4 6 4 4 4-4" />
-          </svg>
-        </span>
+        <div class="body-format-menu" @click.stop @keydown.esc.stop="isBodyMenuOpen = false">
+          <button
+            class="body-format-trigger"
+            type="button"
+            :aria-expanded="isBodyMenuOpen"
+            aria-haspopup="menu"
+            aria-label="Selecionar formato do body"
+            @click="isBodyMenuOpen = !isBodyMenuOpen"
+          >
+            {{ bodyFormatLabel }}
+            <svg class="body-format-chevron" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="m4 6 4 4 4-4" />
+            </svg>
+          </button>
+
+          <div v-if="isBodyMenuOpen" class="body-format-popover" role="menu">
+            <div class="body-format-popover-heading">
+              <span>Payload format</span>
+              <span>Core support</span>
+            </div>
+
+            <div class="body-format-group">
+              <span class="body-format-group-label">FORM</span>
+              <button class="body-format-option" type="button" role="menuitem" disabled>
+                <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3 4.5h10v7H3zM6 4.5v7m4-7v7" />
+                </svg>
+                Multipart Form
+              </button>
+              <button class="body-format-option" type="button" role="menuitem" disabled>
+                <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3 4.5h10v7H3zM5 7h6M5 9h4" />
+                </svg>
+                Form URL Encoded
+              </button>
+            </div>
+
+            <div class="body-format-group">
+              <span class="body-format-group-label">RAW</span>
+              <button
+                class="body-format-option"
+                :class="{ 'body-format-option-active': bodyType === 'json' }"
+                type="button"
+                role="menuitem"
+                :aria-checked="bodyType === 'json'"
+                @click="selectBodyFormat('json')"
+              >
+                <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M5.5 3.5 3 8l2.5 4.5m5-9L13 8l-2.5 4.5" />
+                </svg>
+                JSON
+                <svg v-if="bodyType === 'json'" class="body-format-check" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m3.5 8 3 3 6-6" />
+                </svg>
+              </button>
+              <button class="body-format-option" type="button" role="menuitem" disabled>
+                <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m6 3.5-3 4.5 3 4.5m4-9 3 4.5-3 4.5" />
+                </svg>
+                XML
+              </button>
+              <button
+                class="body-format-option"
+                :class="{ 'body-format-option-active': bodyType === 'text' }"
+                type="button"
+                role="menuitem"
+                :aria-checked="bodyType === 'text'"
+                @click="selectBodyFormat('text')"
+              >
+                <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3 4.5h10M3 8h7M3 11.5h10" />
+                </svg>
+                TEXT
+                <svg v-if="bodyType === 'text'" class="body-format-check" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m3.5 8 3 3 6-6" />
+                </svg>
+              </button>
+              <button class="body-format-option" type="button" role="menuitem" disabled>
+                <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <circle cx="5" cy="5" r="1.5" />
+                  <circle cx="11" cy="11" r="1.5" />
+                  <path d="m6.2 6.2 3.6 3.6" />
+                </svg>
+                SPARQL
+              </button>
+            </div>
+
+            <div class="body-format-group">
+              <span class="body-format-group-label">OTHER</span>
+              <button class="body-format-option" type="button" role="menuitem" disabled>
+                <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M4 2.5h5l3 3v8H4zM9 2.5v3h3" />
+                </svg>
+                File / Binary
+              </button>
+              <button
+                class="body-format-option"
+                :class="{ 'body-format-option-active': bodyType === 'none' }"
+                type="button"
+                role="menuitem"
+                :aria-checked="bodyType === 'none'"
+                @click="selectBodyFormat('none')"
+              >
+                <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m5 5 6 6m0-6-6 6" />
+                </svg>
+                No Body
+                <svg v-if="bodyType === 'none'" class="body-format-check" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m3.5 8 3 3 6-6" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <button class="prettify-button" type="button" :disabled="bodyType !== 'json'" @click="prettifyBody">
+          Prettify
+        </button>
       </div>
 
-      <textarea v-model="bodyText" rows="12" placeholder="Digite o conteúdo da requisição"></textarea>
+      <div class="body-code-editor" :class="{ 'body-code-editor-error': bodyError }">
+        <div ref="bodyGutter" class="body-editor-gutter" aria-hidden="true">
+          <div class="body-gutter-content">
+            <div v-for="lineNumber in bodyLineCount" :key="lineNumber" class="body-gutter-line">
+              <svg v-if="lineNumber === 1" class="body-gutter-fold" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="m4 6 4 4 4-4" />
+              </svg>
+              <span>{{ lineNumber }}</span>
+            </div>
+          </div>
+        </div>
+
+        <pre ref="bodyHighlight" class="body-code-highlight" aria-hidden="true"><code v-html="highlightedBody || '&nbsp;'"></code></pre>
+
+        <div
+          ref="bodyEditor"
+          class="body-code-input"
+          role="textbox"
+          aria-multiline="true"
+          aria-label="Conteúdo do body"
+          :aria-invalid="Boolean(bodyError)"
+          :aria-readonly="bodyType === 'none'"
+          :contenteditable="bodyType !== 'none'"
+          spellcheck="false"
+          @input="handleBodyInput"
+          @scroll="syncBodyScroll"
+        ></div>
+      </div>
 
       <p v-if="bodyError" class="field-error">{{ bodyError }}</p>
-      <p v-else-if="bodyType === 'json' && bodyText.trim()" class="field-success">JSON válido.</p>
     </section>
-
-    <div class="secondary-actions">
-      <button type="button" @click="emit('reset')">Restaurar exemplo</button>
-    </div>
   </form>
 </template>
 
@@ -293,17 +591,73 @@ loadBodyEditor(localRequest.value.body);
   display: flex;
   flex-direction: column;
   gap: 18px;
+  min-height: 100%;
 }
 
-.request-line {
-  display: grid;
-  grid-template-columns: 120px minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: end;
+.request-bar {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-height: 36px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 6px;
+  background: var(--color-surface-2);
 }
 
-.method-field,
-.url-field {
+.request-method-control {
+  flex: 0 0 85px;
+}
+
+.request-method,
+.request-url {
+  min-width: 0;
+  min-height: 34px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.request-method {
+  color: var(--color-success);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.request-url {
+  flex: 1 1 auto;
+  border-left: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+  padding-right: 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+}
+
+.request-url:focus,
+.request-method:focus {
+  outline: none;
+}
+
+.request-bar .select-chevron {
+  right: 10px;
+}
+
+.request-bar .primary-action {
+  flex: 0 0 auto;
+  min-height: 34px;
+  border: 0;
+  border-radius: 0;
+  padding: 0 16px;
+}
+
+.request-bar .primary-action:hover:not(:disabled) {
+  border: 0;
+}
+
+.request-method-control,
+.request-url,
+.request-bar .primary-action {
   min-width: 0;
 }
 
@@ -313,6 +667,12 @@ loadBodyEditor(localRequest.value.body);
   gap: 10px;
   min-width: 0;
   padding-top: 2px;
+}
+
+.body-editor-section {
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 8px;
 }
 
 .composer-tabs {
@@ -372,21 +732,8 @@ loadBodyEditor(localRequest.value.body);
   font-size: 13px;
 }
 
-label {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  text-align: left;
-}
-
-label span {
-  font-size: 13px;
-  font-weight: 600;
-}
-
 input,
-select,
-textarea {
+select {
   box-sizing: border-box;
   width: 100%;
   min-height: 34px;
@@ -424,21 +771,8 @@ textarea {
   transform: translateY(-50%);
 }
 
-.body-type-control {
-  width: 160px;
-  flex: 0 0 160px;
-}
-
-input::placeholder,
-textarea::placeholder {
+input::placeholder {
   color: var(--color-text-subtle);
-}
-
-textarea {
-  resize: vertical;
-  min-height: 180px;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 13px;
 }
 
 input[type="checkbox"] {
@@ -484,11 +818,393 @@ button:disabled {
   background: var(--color-brand);
 }
 
+.body-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+}
+
+.body-toolbar-context {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.body-toolbar-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-brand);
+  box-shadow: 0 0 0 3px rgb(98 217 220 / 10%);
+}
+
+.body-toolbar-title {
+  color: var(--color-text);
+  font-weight: 700;
+}
+
+.body-toolbar-state {
+  color: var(--color-text-subtle);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+}
+
+.body-format-menu {
+  position: relative;
+}
+
+.body-format-trigger,
+.prettify-button {
+  min-height: 28px;
+  border: 0;
+  border-radius: 4px;
+  padding: 3px 6px;
+  background: transparent;
+  font-size: 12px;
+}
+
+.body-format-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-brand-warm);
+  font-weight: 700;
+}
+
+.body-format-trigger:hover:not(:disabled) {
+  color: #f8fafc;
+  background: var(--color-surface-2);
+}
+
+.body-format-trigger span {
+  display: none;
+}
+
+.body-format-chevron {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.3;
+}
+
+.prettify-button {
+  color: #94a3b8;
+}
+
+.prettify-button:hover:not(:disabled) {
+  color: #f8fafc;
+  background: var(--color-surface-2);
+}
+
+.prettify-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.body-format-popover {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 6px);
+  right: 0;
+  display: grid;
+  width: 224px;
+  gap: 9px;
+  padding: 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface-1);
+  box-shadow: 0 12px 24px rgb(0 0 0 / 28%);
+}
+
+.body-format-popover-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 7px 5px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.body-format-popover-heading span:last-child {
+  color: var(--color-text-subtle);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.body-format-group {
+  display: grid;
+  gap: 2px;
+}
+
+.body-format-group-label {
+  padding: 2px 7px 3px;
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.body-format-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  border: 0;
+  border-radius: 4px;
+  padding: 4px 7px;
+  color: var(--color-text-muted);
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+}
+
+.body-format-option:hover:not(:disabled),
+.body-format-option-active {
+  color: var(--color-brand);
+  background: rgb(98 217 220 / 10%);
+}
+
+.body-format-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.9;
+}
+
+.body-format-check {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--color-brand);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+.body-format-icon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.2;
+}
+
+.body-code-editor {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 220px;
+  overflow: hidden;
+  background: #0d0f12;
+  color: #e2e8f0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.body-editor-gutter,
+.body-code-highlight,
+.body-code-input {
+  position: absolute;
+  inset: 0;
+}
+
+.body-editor-gutter {
+  z-index: 1;
+  right: auto;
+  width: 36px;
+  overflow: hidden;
+  padding-top: 10px;
+  color: #475569;
+  user-select: none;
+}
+
+.body-gutter-content {
+  min-height: 100%;
+}
+
+.body-gutter-line {
+  position: relative;
+  display: flex;
+  height: 1.6em;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 7px;
+}
+
+.body-gutter-fold {
+  position: absolute;
+  left: 7px;
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: #94a3b8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.3;
+}
+
+.body-code-highlight,
+.body-code-input {
+  box-sizing: border-box;
+  margin: 0;
+  border: 0;
+  padding: 10px 14px 10px 48px;
+  font: inherit;
+  line-height: inherit;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.body-code-highlight {
+  z-index: 0;
+  max-height: none;
+  overflow: auto;
+  background: #0d0f12;
+  color: #e2e8f0;
+  pointer-events: none;
+  scrollbar-width: none;
+}
+
+.body-code-highlight::-webkit-scrollbar,
+.body-code-input::-webkit-scrollbar {
+  display: none;
+}
+
+.body-code-input {
+  z-index: 2;
+  overflow: auto;
+  outline: none;
+  color: transparent;
+  caret-color: var(--color-brand);
+  background: transparent;
+  white-space: pre;
+  overflow-wrap: normal;
+  scrollbar-width: none;
+}
+
+.body-code-input:focus {
+  outline: none;
+}
+
+:deep(.token-key) {
+  color: #60a5fa;
+}
+
+:deep(.token-number) {
+  color: #c084fc;
+}
+
+:deep(.token-string) {
+  color: #fb923c;
+}
+
+:deep(.token-literal) {
+  color: #c084fc;
+}
+
+.body-code-editor-error {
+  box-shadow: inset 2px 0 0 var(--color-danger);
+}
+
 .pair-row {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr) minmax(0, 2fr) auto;
   gap: 8px;
   align-items: center;
+}
+
+.params-table {
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.params-table-header,
+.parameter-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) minmax(0, 2fr) 34px;
+  align-items: center;
+}
+
+.params-table-header {
+  min-height: 24px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  background: var(--color-surface-1);
+  font-size: 11px;
+}
+
+.params-table-header span {
+  padding: 0 8px;
+}
+
+.parameter-row {
+  min-height: 28px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.parameter-row:last-child {
+  border-bottom: 0;
+}
+
+.parameter-row > input[type="checkbox"] {
+  justify-self: center;
+  margin: 0;
+}
+
+.parameter-cell {
+  min-height: 28px;
+  border: 0;
+  border-left: 1px solid var(--color-border);
+  border-radius: 0;
+  padding: 4px 8px;
+  background: transparent;
+  font-size: 12px;
+}
+
+.parameter-cell:focus {
+  outline: 1px solid var(--color-brand);
+  outline-offset: -1px;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  min-height: 28px;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  color: var(--color-text-subtle);
+  background: transparent;
+}
+
+.icon-button:hover:not(:disabled) {
+  color: var(--color-danger);
+  background: transparent;
+}
+
+.icon-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.2;
 }
 
 .muted {
@@ -506,15 +1222,21 @@ button:disabled {
   color: var(--color-success);
 }
 
-.secondary-actions {
-  display: flex;
-  justify-content: flex-end;
-}
-
 @media (max-width: 700px) {
-  .request-line,
   .pair-row {
     grid-template-columns: 1fr;
+  }
+
+  .request-bar {
+    min-width: 0;
+  }
+
+  .request-method-control {
+    flex-basis: 76px;
+  }
+
+  .request-bar .primary-action {
+    padding: 0 10px;
   }
 
   input[type="checkbox"] {

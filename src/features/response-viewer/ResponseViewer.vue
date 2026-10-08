@@ -31,45 +31,19 @@ const formattedBody = computed(() => {
     return props.response.body;
   }
 });
+
+const responseSizeKb = computed(() => {
+  if (!props.response) {
+    return "---";
+  }
+
+  return (props.response.bodySize / 1024).toFixed(1);
+});
 </script>
 
 <template>
   <section class="response-viewer" aria-live="polite">
-    <div class="viewer-heading">
-      <div>
-        <p class="viewer-kicker">INSPECTOR</p>
-        <h2>Resposta</h2>
-        <p>Evidência da última execução.</p>
-      </div>
-
-      <span v-if="props.isLoading" class="status status-loading">Executando</span>
-      <span v-else-if="props.response" class="status status-success">Concluída</span>
-      <span v-else-if="props.error" class="status status-error">Falhou</span>
-    </div>
-
-    <div v-if="props.isLoading" class="response-state">
-      A requisição está sendo executada...
-    </div>
-
-    <div v-else-if="props.error" class="response-state response-error">
-      <strong>Erro técnico:</strong>
-      <p>{{ props.error }}</p>
-    </div>
-
-    <div v-else-if="props.response" class="response-content">
-      <div class="response-summary">
-        <strong>{{ props.response.status }} {{ props.response.statusText }}</strong>
-        <span class="response-metric">
-          <small>Tempo medido</small>
-          {{ props.response.durationMs }} ms
-        </span>
-        <span class="response-metric">
-          <small>Body medido</small>
-          {{ props.response.bodySize }} bytes
-        </span>
-      </div>
-
-      <nav class="response-tabs" aria-label="Seções da resposta" role="tablist">
+    <nav class="response-tabs" aria-label="Seções do inspector" role="tablist">
         <button
           class="response-tab"
           :class="{ 'response-tab-active': activeTab === 'body' }"
@@ -115,6 +89,29 @@ const formattedBody = computed(() => {
           Diagnostics
         </button>
       </nav>
+
+    <div class="response-status" aria-label="Resumo da execução">
+      <span class="status-placeholder" :class="{ 'status-placeholder-active': props.response }">
+        Status: {{ props.response ? `${props.response.status} ${props.response.statusText}` : "---" }}
+      </span>
+      <span class="status-placeholder">
+        Tempo: {{ props.response ? props.response.durationMs : "---" }} ms
+      </span>
+      <span class="status-placeholder">
+        Tamanho: {{ responseSizeKb }} KB
+      </span>
+    </div>
+
+    <div v-if="props.isLoading" class="response-code-surface">
+      <p class="response-empty">Executando requisição...</p>
+    </div>
+
+    <div v-else-if="props.error" class="response-code-surface response-error">
+      <strong>Erro técnico:</strong>
+      <p>{{ props.error }}</p>
+    </div>
+
+    <div v-else-if="props.response" class="response-content">
 
       <section v-if="activeTab === 'body'" id="response-body-panel" class="tab-panel" role="tabpanel">
         <div class="tab-panel-heading">
@@ -184,8 +181,8 @@ const formattedBody = computed(() => {
       </section>
     </div>
 
-    <div v-else class="response-state">
-      Envie uma requisição para visualizar a resposta.
+    <div v-else class="response-code-surface">
+      <p class="response-empty">Aguardando execução da requisição</p>
     </div>
   </section>
 </template>
@@ -205,58 +202,6 @@ const formattedBody = computed(() => {
   text-align: left;
 }
 
-.viewer-heading,
-.response-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.viewer-heading h2 {
-  margin: 0;
-}
-
-.viewer-kicker {
-  margin: 0 0 5px;
-  color: var(--color-text-subtle);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
-.viewer-heading p {
-  margin: 4px 0 0;
-  color: var(--color-text-muted);
-  font-size: 13px;
-}
-
-.status {
-  border-radius: 999px;
-  padding: 4px 9px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.status-loading {
-  color: var(--color-brand);
-  background: #163238;
-}
-
-.status-success {
-  color: var(--color-success);
-  background: #163329;
-}
-
-.status-error {
-  color: var(--color-danger);
-  background: #3b2024;
-}
-
-.response-state {
-  color: var(--color-text-muted);
-}
-
 .response-error {
   color: var(--color-danger);
 }
@@ -271,34 +216,48 @@ const formattedBody = computed(() => {
   gap: 10px;
 }
 
-.response-summary {
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.response-summary span {
-  color: var(--color-text-muted);
-}
-
-.response-metric {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-}
-
-.response-metric small {
-  color: var(--color-text-subtle);
-  font-size: 10px;
-  text-transform: uppercase;
-}
-
 .response-tabs {
   display: flex;
   gap: 4px;
   overflow-x: auto;
   border-bottom: 1px solid var(--color-border);
+}
+
+.response-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.status-placeholder {
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 4px 7px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-2);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.status-placeholder-active {
+  color: var(--color-text);
+}
+
+.response-code-surface {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 220px;
+  flex-direction: column;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-code-bg);
+}
+
+.response-empty {
+  margin: 0;
+  color: var(--color-text-subtle);
+  text-align: center;
 }
 
 .response-tab {
@@ -500,16 +459,9 @@ pre {
     padding: 14px 12px 24px;
   }
 
-  .viewer-heading,
   .tab-panel-heading {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .response-summary {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 4px;
   }
 
   .response-headers,

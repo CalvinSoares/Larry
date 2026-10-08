@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { onMounted, ref } from "vue";
 
 import RequestEditor from "./features/request-editor/RequestEditor.vue";
 import ResponseViewer from "./features/response-viewer/ResponseViewer.vue";
@@ -70,14 +70,6 @@ function completeOnboarding() {
 
   isWelcomeOpen.value = false;
 }
-
-const requestDraftJson = computed(() => {
-  if (!requestDraft.value) {
-    return "";
-  }
-
-  return JSON.stringify(requestDraft.value, null, 2);
-});
 
 async function loadApplication() {
   try {
@@ -370,14 +362,6 @@ onMounted(async () => {
       />
 
       <article class="panel request-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">COMPOSER</p>
-            <h1>{{ requestDraft.name }}</h1>
-          </div>
-          <span class="panel-state">HTTP request</span>
-        </div>
-
         <RequestEditor
           :request="requestDraft"
           :is-executing="isExecuting"
@@ -387,11 +371,6 @@ onMounted(async () => {
           @reset="resetRequest"
           @validation-error="editorError = $event"
         />
-
-        <details class="request-preview">
-          <summary>Ver modelo serializado</summary>
-          <pre>{{ requestDraftJson }}</pre>
-        </details>
       </article>
 
       <ResponseViewer
@@ -475,13 +454,6 @@ textarea {
   overflow: hidden;
 }
 
-.panel-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
 .eyebrow {
   margin: 0 0 6px;
   color: var(--color-text-subtle);
@@ -497,22 +469,10 @@ p {
   margin-top: 0;
 }
 
-h1 {
-  margin-bottom: 0;
-  color: var(--color-text);
-  font-size: 18px;
-  letter-spacing: -0.015em;
-}
-
 h2 {
   margin-bottom: 0;
   color: var(--color-text);
   font-size: 20px;
-}
-
-.panel-state {
-  color: var(--color-text-muted);
-  font-size: 12px;
 }
 
 .workspace {
@@ -549,26 +509,6 @@ h2 {
 .request-panel {
   overflow-y: auto;
   padding: 16px 20px 28px;
-}
-
-.panel-heading {
-  min-height: 42px;
-  margin-bottom: 14px;
-  border-bottom: 1px solid var(--color-border);
-  padding-bottom: 12px;
-}
-
-.request-preview {
-  margin-top: 20px;
-  border-top: 1px solid var(--color-border);
-  padding-top: 14px;
-  color: var(--color-text-muted);
-  font-size: 13px;
-}
-
-.request-preview summary {
-  cursor: pointer;
-  font-weight: 600;
 }
 
 pre {
@@ -683,12 +623,6 @@ summary:focus-visible {
 }
 
 @media (max-width: 520px) {
-  .panel-heading {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 10px;
-  }
-
   .request-panel {
     padding: 14px 12px 24px;
   }

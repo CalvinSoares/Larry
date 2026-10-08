@@ -185,7 +185,6 @@ onBeforeUnmount(() => {
               <span class="method-badge">{{ item.method }}</span>
               <strong>{{ item.name }}</strong>
             </span>
-            <span class="request-item-url" :title="item.url">{{ item.url }}</span>
           </span>
         </button>
 
@@ -321,30 +320,30 @@ button:disabled {
 .request-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 1px;
   min-height: 0;
 }
 
 .request-item {
   position: relative;
+  height: 32px;
+  min-height: 32px;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 4px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 5px 6px;
+  border: 0;
+  border-radius: 4px;
+  padding: 1px 6px;
   background: transparent;
 }
 
 .request-item:hover,
 .request-item:focus-within {
-  border-color: var(--color-border-strong);
   outline: none;
-  background: transparent;
+  background: var(--color-surface-2);
 }
 
 .request-item-active {
-  border-color: var(--color-brand-strong);
   background: #142328;
 }
 
@@ -356,9 +355,9 @@ button:disabled {
 
 .request-item-select {
   display: block;
-  min-height: 42px;
+  min-height: 30px;
   border: 0;
-  padding: 2px;
+  padding: 0 2px;
   overflow: hidden;
   text-align: left;
 }
@@ -369,7 +368,8 @@ button:disabled {
 }
 
 .request-item-main {
-  display: block;
+  display: flex;
+  align-items: center;
   min-width: 0;
 }
 
@@ -381,7 +381,7 @@ button:disabled {
 .request-item-title strong {
   overflow: hidden;
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -392,18 +392,6 @@ button:disabled {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 10px;
   font-weight: 800;
-}
-
-.request-item-url {
-  display: block;
-  max-width: 100%;
-  margin-top: 4px;
-  overflow: hidden;
-  color: var(--color-text-subtle);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .request-item-actions {
@@ -481,7 +469,7 @@ button:disabled {
 .request-rename-form {
   display: flex;
   align-items: center;
-  min-height: 42px;
+  min-height: 30px;
 }
 
 .request-rename-form input {
