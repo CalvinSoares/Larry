@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import type { ComponentPublicInstance } from "vue";
 
 import AppModal from "../../components/ui/AppModal.vue";
 import type { RequestDefinition } from "../../types/api";
@@ -12,18 +13,66 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: "select-request", requestId: string): void;
   (event: "add-request"): void;
+  (event: "rename-request", requestId: string, name: string): void;
   (event: "duplicate-request", requestId: string): void;
   (event: "remove-request", requestId: string): void;
 }>();
 
 const pendingRemoval = ref<RequestDefinition | null>(null);
+const openMenuId = ref<string | null>(null);
+const editingRequestId = ref<string | null>(null);
+const renameDraft = ref("");
+const renameInput = ref<HTMLInputElement | null>(null);
 
 function selectRequest(requestId: string) {
+  openMenuId.value = null;
   emit("select-request", requestId);
 }
 
 function duplicateRequest(requestId: string) {
+  openMenuId.value = null;
   emit("duplicate-request", requestId);
+}
+
+function toggleMenu(requestId: string) {
+  openMenuId.value = openMenuId.value === requestId ? null : requestId;
+}
+
+function closeMenuOnOutsidePointer(event: PointerEvent) {
+  const target = event.target;
+
+  if (!(target instanceof Element) || !target.closest(".request-item-actions")) {
+    openMenuId.value = null;
+  }
+}
+
+async function startRename(request: RequestDefinition) {
+  openMenuId.value = null;
+  editingRequestId.value = request.id;
+  renameDraft.value = request.name;
+
+  await nextTick();
+  renameInput.value?.focus();
+  renameInput.value?.select();
+}
+
+function cancelRename() {
+  editingRequestId.value = null;
+  renameDraft.value = "";
+}
+
+function setRenameInput(element: Element | ComponentPublicInstance | null) {
+  renameInput.value = element instanceof HTMLInputElement ? element : null;
+}
+
+function confirmRename(request: RequestDefinition) {
+  const name = renameDraft.value.trim();
+
+  if (name && name !== request.name) {
+    emit("rename-request", request.id, name);
+  }
+
+  cancelRename();
 }
 
 function removeRequest(requestId: string) {
@@ -36,6 +85,7 @@ function removeRequest(requestId: string) {
     return;
   }
 
+  openMenuId.value = null;
   pendingRemoval.value = request;
 }
 
@@ -51,6 +101,14 @@ function confirmRemoval() {
   emit("remove-request", pendingRemoval.value.id);
   pendingRemoval.value = null;
 }
+
+onMounted(() => {
+  document.addEventListener("pointerdown", closeMenuOnOutsidePointer);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", closeMenuOnOutsidePointer);
+});
 </script>
 
 <template>
@@ -92,48 +150,83 @@ function confirmRemoval() {
     </div>
 
     <div class="request-list" aria-label="Requests da collection">
-      <div
+      <article
         v-for="item in props.requests"
         :key="item.id"
         class="request-item"
         :class="{ 'request-item-active': item.id === props.activeRequestId }"
-        role="button"
-        tabindex="0"
-        :aria-current="item.id === props.activeRequestId ? 'page' : undefined"
-        @click="selectRequest(item.id)"
-        @keydown.enter="selectRequest(item.id)"
-        @keydown.space.prevent="selectRequest(item.id)"
       >
-        <div class="request-item-main">
-          <div class="request-item-title">
-            <span class="method-badge">{{ item.method }}</span>
-            <strong :title="item.name">{{ item.name }}</strong>
-          </div>
-          <span class="request-item-url" :title="item.url">{{ item.url }}</span>
-        </div>
+        <form
+          v-if="editingRequestId === item.id"
+          class="request-rename-form"
+          @submit.prevent="confirmRename(item)"
+        >
+          <input
+            :ref="setRenameInput"
+            v-model="renameDraft"
+            :aria-label="`Novo nome para ${item.name}`"
+            type="text"
+            required
+            @keydown.esc.prevent="cancelRename"
+            @click.stop
+          />
+        </form>
 
-        <div class="request-item-actions" @click.stop>
+        <button
+          v-else
+          class="request-item-select"
+          type="button"
+          :aria-current="item.id === props.activeRequestId ? 'page' : undefined"
+          :title="item.name"
+          @click="selectRequest(item.id)"
+        >
+          <span class="request-item-main">
+            <span class="request-item-title">
+              <span class="method-badge">{{ item.method }}</span>
+              <strong>{{ item.name }}</strong>
+            </span>
+            <span class="request-item-url" :title="item.url">{{ item.url }}</span>
+          </span>
+        </button>
+
+        <div class="request-item-actions">
           <button
+            class="request-menu-trigger"
             type="button"
-            class="row-action"
-            :aria-label="`Duplicar ${item.name}`"
-            :title="`Duplicar ${item.name}`"
-            @click="duplicateRequest(item.id)"
+            :aria-label="`Ações para ${item.name}`"
+            :aria-expanded="openMenuId === item.id"
+            aria-haspopup="menu"
+            :title="`Ações para ${item.name}`"
+            @click.stop="toggleMenu(item.id)"
           >
-            Duplicar
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="3" cy="8" r="1" />
+              <circle cx="8" cy="8" r="1" />
+              <circle cx="13" cy="8" r="1" />
+            </svg>
           </button>
-          <button
-            type="button"
-            class="row-action danger-action"
-            :aria-label="`Remover ${item.name}`"
-            :title="`Remover ${item.name}`"
-            :disabled="props.requests.length <= 1"
-            @click="removeRequest(item.id)"
+
+          <div
+            v-if="openMenuId === item.id"
+            class="request-menu"
+            role="menu"
+            :aria-label="`Ações da request ${item.name}`"
+            @keydown.esc.prevent="openMenuId = null"
           >
-            Remover
-          </button>
+            <button type="button" role="menuitem" @click="startRename(item)">Renomear</button>
+            <button type="button" role="menuitem" @click="duplicateRequest(item.id)">Duplicar</button>
+            <button
+              type="button"
+              role="menuitem"
+              class="danger-action"
+              :disabled="props.requests.length <= 1"
+              @click="removeRequest(item.id)"
+            >
+              Remover
+            </button>
+          </div>
         </div>
-      </div>
+      </article>
 
       <p v-if="props.requests.length === 0" class="empty-list">
         Nenhuma request nesta collection.
@@ -191,9 +284,9 @@ button {
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--color-brand);
-  background: var(--color-surface-3);
-  color: var(--color-text);
+  border-color: var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-muted);
 }
 
 button:disabled {
@@ -233,27 +326,50 @@ button:disabled {
 }
 
 .request-item {
+  position: relative;
+  display: flex;
   align-items: flex-start;
+  gap: 4px;
   border: 1px solid transparent;
   border-radius: 6px;
-  padding: 9px;
-  cursor: pointer;
+  padding: 5px 6px;
   background: transparent;
 }
 
 .request-item:hover,
-.request-item:focus-visible {
+.request-item:focus-within {
   border-color: var(--color-border-strong);
   outline: none;
-  background: var(--color-surface-2);
+  background: transparent;
 }
 
 .request-item-active {
   border-color: var(--color-brand-strong);
-  background: #172b30;
+  background: #142328;
+}
+
+.request-item-select,
+.request-rename-form {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.request-item-select {
+  display: block;
+  min-height: 42px;
+  border: 0;
+  padding: 2px;
+  overflow: hidden;
+  text-align: left;
+}
+
+.request-item-select:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
 }
 
 .request-item-main {
+  display: block;
   min-width: 0;
 }
 
@@ -291,9 +407,9 @@ button:disabled {
 }
 
 .request-item-actions {
+  position: relative;
   display: flex;
   flex: 0 0 auto;
-  gap: 4px;
   opacity: 0;
   transition: opacity 120ms ease;
 }
@@ -304,13 +420,85 @@ button:disabled {
   opacity: 1;
 }
 
-.row-action {
-  padding: 4px 6px;
-  font-size: 10px;
+.request-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  min-height: 28px;
+  border-color: transparent;
+  padding: 0;
+}
+
+.request-menu-trigger:hover:not(:disabled),
+.request-menu-trigger[aria-expanded="true"] {
+  border-color: var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.request-menu-trigger svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.request-menu {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  min-width: 132px;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 6px;
+  background: var(--color-surface-1);
+  box-shadow: 0 3px 8px rgb(0 0 0 / 20%);
+}
+
+.request-item:last-child .request-menu {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+.request-menu button {
+  min-height: 28px;
+  border-color: transparent;
+  padding: 4px 8px;
+  color: var(--color-text-muted);
+  text-align: left;
+  font-size: 12px;
+}
+
+.request-menu button:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-text);
+}
+
+.request-rename-form {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+}
+
+.request-rename-form input {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  padding: 5px 7px;
+  color: var(--color-text);
+  background: var(--color-surface-2);
+  font: inherit;
+  font-size: 13px;
 }
 
 .danger-action:hover:not(:disabled) {
-  border-color: var(--color-danger);
+  border-color: transparent;
+  background: transparent;
   color: var(--color-danger);
 }
 

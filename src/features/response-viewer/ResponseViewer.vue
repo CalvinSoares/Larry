@@ -37,8 +37,9 @@ const formattedBody = computed(() => {
   <section class="response-viewer" aria-live="polite">
     <div class="viewer-heading">
       <div>
-        <h2>Response</h2>
-        <p>Resultado da última execução.</p>
+        <p class="viewer-kicker">INSPECTOR</p>
+        <h2>Resposta</h2>
+        <p>Evidência da última execução.</p>
       </div>
 
       <span v-if="props.isLoading" class="status status-loading">Executando</span>
@@ -138,28 +139,48 @@ const formattedBody = computed(() => {
         <p v-else class="empty-tab-state">A resposta não retornou headers.</p>
       </section>
 
-      <section v-else-if="activeTab === 'trace'" id="response-trace-panel" class="tab-panel unavailable-panel" role="tabpanel">
-        <span class="unavailable-label">TRACE INDISPONÍVEL</span>
-        <h3>O core ainda não emitiu eventos de rede para esta execução.</h3>
-        <p>DNS, TCP, TLS, TTFB, download e reuso de conexão aparecerão aqui quando o executor fornecer essas fases.</p>
+      <section v-else-if="activeTab === 'trace'" id="response-trace-panel" class="tab-panel evidence-panel" role="tabpanel">
+        <span class="evidence-label">TRACE HTTP</span>
+        <h3>Timeline observada da execução</h3>
+        <p>Uma fase indisponível continua visível para não confundir ausência de medição com duração zero.</p>
+        <ol class="trace-list">
+          <li v-for="phase in props.response.trace.phases" :key="phase.name">
+            <div>
+              <strong>{{ phase.name.toUpperCase() }}</strong>
+              <small>{{ phase.detail }}</small>
+            </div>
+            <span>
+              {{ phase.durationMs === null ? "Indisponível" : `${phase.durationMs} ms` }}
+              <small>{{ phase.provenance }}</small>
+            </span>
+          </li>
+        </ol>
         <dl class="availability-list">
-          <dt>Origem</dt>
-          <dd>Sem evento de trace</dd>
-          <dt>Confiança</dt>
-          <dd>Indisponível</dd>
+          <dt>IPs resolvidos</dt>
+          <dd>{{ props.response.trace.resolvedAddresses.join(", ") || "Indisponível" }}</dd>
+          <dt>HTTP</dt>
+          <dd>{{ props.response.trace.httpVersion || "Indisponível" }}</dd>
+          <dt>Reuso</dt>
+          <dd>{{ props.response.trace.connectionReuse.value || props.response.trace.connectionReuse.provenance }}</dd>
+          <dt>TLS</dt>
+          <dd>{{ props.response.trace.tls.value || props.response.trace.tls.provenance }}</dd>
         </dl>
       </section>
 
-      <section v-else id="response-diagnostics-panel" class="tab-panel unavailable-panel" role="tabpanel">
-        <span class="unavailable-label">DIAGNÓSTICO INDISPONÍVEL</span>
-        <h3>A classificação por camada ainda não está disponível.</h3>
-        <p>Quando houver eventos reais, o Larry separará falhas de DNS, transporte, TLS, protocolo HTTP e aplicação.</p>
-        <ol class="layer-list">
-          <li><span>DNS</span><strong>Aguardando eventos</strong></li>
-          <li><span>Transporte</span><strong>Aguardando eventos</strong></li>
-          <li><span>TLS</span><strong>Aguardando eventos</strong></li>
-          <li><span>Aplicação</span><strong>Aguardando eventos</strong></li>
+      <section v-else id="response-diagnostics-panel" class="tab-panel evidence-panel" role="tabpanel">
+        <span class="evidence-label">DIAGNÓSTICO POR CAMADA</span>
+        <h3>{{ props.response.diagnostics[0]?.summary || "Nenhum diagnóstico produzido." }}</h3>
+        <p v-if="props.response.diagnostics[0]">
+          Camada observada: {{ props.response.diagnostics[0].layer }}.
+          {{ props.response.diagnostics[0].technical }}
+        </p>
+        <ol v-if="props.response.diagnostics.length" class="layer-list">
+          <li v-for="diagnostic in props.response.diagnostics" :key="diagnostic.kind">
+            <span>{{ diagnostic.layer }}</span>
+            <strong>{{ diagnostic.kind }} · {{ diagnostic.provenance }}</strong>
+          </li>
         </ol>
+        <p v-else>Nenhum diagnóstico foi retornado pelo core.</p>
       </section>
     </div>
 
@@ -194,6 +215,14 @@ const formattedBody = computed(() => {
 
 .viewer-heading h2 {
   margin: 0;
+}
+
+.viewer-kicker {
+  margin: 0 0 5px;
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
 }
 
 .viewer-heading p {
@@ -307,7 +336,7 @@ const formattedBody = computed(() => {
 }
 
 .tab-panel-heading h3,
-.unavailable-panel h3 {
+.evidence-panel h3 {
   margin: 0;
 }
 
@@ -327,14 +356,14 @@ const formattedBody = computed(() => {
   background: var(--color-surface-2);
 }
 
-.unavailable-panel {
+.evidence-panel {
   padding: 16px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
   background: var(--color-surface-2);
 }
 
-.unavailable-label {
+.evidence-label {
   display: block;
   margin-bottom: 10px;
   color: var(--color-warning);
@@ -343,7 +372,7 @@ const formattedBody = computed(() => {
   letter-spacing: 0.08em;
 }
 
-.unavailable-panel p {
+.evidence-panel p {
   margin: 8px 0 0;
   color: var(--color-text-muted);
   line-height: 1.5;
@@ -370,6 +399,43 @@ const formattedBody = computed(() => {
 .availability-list dd {
   margin: 0;
   color: var(--color-text-muted);
+}
+
+.trace-list {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trace-list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 8px;
+}
+
+.trace-list li > div,
+.trace-list li > span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.trace-list li > span {
+  align-items: flex-end;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.trace-list small {
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  font-weight: 400;
+  white-space: normal;
 }
 
 .layer-list {
@@ -461,6 +527,14 @@ pre {
     align-items: flex-start;
     flex-direction: column;
     gap: 2px;
+  }
+
+  .trace-list li {
+    flex-direction: column;
+  }
+
+  .trace-list li > span {
+    align-items: flex-start;
   }
 }
 </style>

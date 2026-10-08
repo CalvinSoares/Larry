@@ -14,9 +14,15 @@ import type {
 
 const CURRENT_SCHEMA_VERSION = 1;
 
-const props = defineProps<{
-  requests: RequestDefinition[];
-}>();
+const props = withDefaults(
+  defineProps<{
+    requests: RequestDefinition[];
+    embedded?: boolean;
+  }>(),
+  {
+    embedded: false,
+  },
+);
 
 const emit = defineEmits<{
   (event: "loaded-collection", collection: CollectionFile): void;
@@ -103,7 +109,7 @@ async function handleLoad() {
 
 <template>
   <section class="collection-manager">
-    <div class="section-heading">
+    <div v-if="!props.embedded" class="section-heading">
       <div>
         <p class="eyebrow">FILE-FIRST</p>
         <h3>Collection local</h3>
@@ -219,8 +225,9 @@ button {
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--color-brand);
-  background: var(--color-surface-3);
+  border-color: var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-muted);
 }
 
 button:disabled {

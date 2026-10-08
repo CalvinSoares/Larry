@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 
 import type {
   RequestBody,
@@ -31,6 +31,15 @@ const localRequest = ref<RequestDefinition>(cloneRequest(props.request));
 const bodyType = ref<"json" | "text">("json");
 const bodyText = ref("");
 const bodyError = ref("");
+type ComposerTab = "params" | "headers" | "body";
+const activeTab = ref<ComposerTab>("params");
+
+const enabledParameterCount = computed(
+  () => localRequest.value.query.filter((parameter) => parameter.enabled).length,
+);
+const enabledHeaderCount = computed(
+  () => localRequest.value.headers.filter((header) => header.enabled).length,
+);
 
 function cloneRequest(request: RequestDefinition) {
   return JSON.parse(JSON.stringify(request)) as RequestDefinition;
@@ -77,6 +86,7 @@ function removeQueryParam(index: number) {
 
 function handleSubmit() {
   if (bodyError.value) {
+    activeTab.value = "body";
     emit("validation-error", bodyError.value);
     return;
   }
@@ -157,32 +167,48 @@ loadBodyEditor(localRequest.value.body);
       </button>
     </div>
 
-    <label>
-      <span>Nome da requisição</span>
-      <input v-model="localRequest.name" type="text" required />
-    </label>
+    <nav class="composer-tabs" aria-label="Configurações da request" role="tablist">
+      <button
+        class="composer-tab"
+        :class="{ 'composer-tab-active': activeTab === 'params' }"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'params'"
+        aria-controls="request-params-panel"
+        @click="activeTab = 'params'"
+      >
+        Params <span>{{ enabledParameterCount }}</span>
+      </button>
+      <button
+        class="composer-tab"
+        :class="{ 'composer-tab-active': activeTab === 'headers' }"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'headers'"
+        aria-controls="request-headers-panel"
+        @click="activeTab = 'headers'"
+      >
+        Headers <span>{{ enabledHeaderCount }}</span>
+      </button>
+      <button
+        class="composer-tab"
+        :class="{ 'composer-tab-active': activeTab === 'body' }"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'body'"
+        aria-controls="request-body-panel"
+        @click="activeTab = 'body'"
+      >
+        Body <span>{{ localRequest.body ? 1 : 0 }}</span>
+      </button>
+    </nav>
 
-    <section class="editor-section">
-      <div class="section-heading">
-        <div>
-          <h3>Headers</h3>
-          <p>Somente headers habilitados serão enviados.</p>
-        </div>
-
-        <button type="button" @click="addHeader">Adicionar</button>
-      </div>
-
-      <div v-for="(header, index) in localRequest.headers" :key="index" class="pair-row">
-        <input v-model="header.enabled" type="checkbox" :aria-label="`Habilitar header ${index + 1}`" />
-        <input v-model="header.name" type="text" placeholder="Nome" :aria-label="`Nome do header ${index + 1}`" />
-        <input v-model="header.value" type="text" placeholder="Valor" :aria-label="`Valor do header ${index + 1}`" />
-        <button type="button" @click="removeHeader(index)">Remover</button>
-      </div>
-
-      <p v-if="localRequest.headers.length === 0" class="muted">Nenhum header configurado.</p>
-    </section>
-
-    <section class="editor-section">
+    <section
+      v-if="activeTab === 'params'"
+      id="request-params-panel"
+      class="editor-section"
+      role="tabpanel"
+    >
       <div class="section-heading">
         <div>
           <h3>Query parameters</h3>
@@ -202,7 +228,37 @@ loadBodyEditor(localRequest.value.body);
       <p v-if="localRequest.query.length === 0" class="muted">Nenhum parâmetro configurado.</p>
     </section>
 
-    <section class="editor-section">
+    <section
+      v-else-if="activeTab === 'headers'"
+      id="request-headers-panel"
+      class="editor-section"
+      role="tabpanel"
+    >
+      <div class="section-heading">
+        <div>
+          <h3>Headers</h3>
+          <p>Somente headers habilitados serão enviados.</p>
+        </div>
+
+        <button type="button" @click="addHeader">Adicionar</button>
+      </div>
+
+      <div v-for="(header, index) in localRequest.headers" :key="index" class="pair-row">
+        <input v-model="header.enabled" type="checkbox" :aria-label="`Habilitar header ${index + 1}`" />
+        <input v-model="header.name" type="text" placeholder="Nome" :aria-label="`Nome do header ${index + 1}`" />
+        <input v-model="header.value" type="text" placeholder="Valor" :aria-label="`Valor do header ${index + 1}`" />
+        <button type="button" @click="removeHeader(index)">Remover</button>
+      </div>
+
+      <p v-if="localRequest.headers.length === 0" class="muted">Nenhum header configurado.</p>
+    </section>
+
+    <section
+      v-else
+      id="request-body-panel"
+      class="editor-section"
+      role="tabpanel"
+    >
       <div class="section-heading">
         <div>
           <h3>Body</h3>
@@ -255,8 +311,48 @@ loadBodyEditor(localRequest.value.body);
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding-top: 12px;
-  border-top: 1px solid var(--color-border);
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.composer-tabs {
+  display: flex;
+  min-width: 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.composer-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0 10px;
+  color: var(--color-text-muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.composer-tab:hover:not(:disabled) {
+  border-color: transparent;
+  color: var(--color-text);
+  background: transparent;
+}
+
+.composer-tab-active {
+  border-bottom-color: var(--color-brand);
+  color: var(--color-text);
+}
+
+.composer-tab span {
+  color: var(--color-text-subtle);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .section-heading {
@@ -365,8 +461,9 @@ button {
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--color-brand);
-  background: var(--color-surface-3);
+  border-color: var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-muted);
 }
 
 button:disabled {
@@ -379,6 +476,12 @@ button:disabled {
   color: #071315;
   background: var(--color-brand);
   font-weight: 700;
+}
+
+.primary-action:hover:not(:disabled) {
+  border-color: var(--color-brand-strong);
+  color: #071315;
+  background: var(--color-brand);
 }
 
 .pair-row {
