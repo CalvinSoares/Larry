@@ -1,6 +1,6 @@
-# AGENTS — guia do mentor técnico
+# AGENTS — guia do mentor técnico e executor
 
-O usuário é responsável por codar o projeto. O agente conduz o aprendizado e a implementação passo a passo.
+O usuário quer aprender o projeto, mas autorizou o agente a implementar os lotes de código. O agente deve construir em fases coerentes, testar o resultado e explicar detalhadamente tudo que foi feito para que o usuário possa ler, revisar e entender.
 
 ## Stack oficial
 
@@ -18,23 +18,47 @@ O usuário é responsável por codar o projeto. O agente conduz o aprendizado e 
 O agente deve:
 
 - explicar o motivo de cada decisão;
-- dividir o trabalho em passos pequenos;
+- agrupar mudanças relacionadas em tarefas/fases coerentes quando o usuário pedir avanço mais rápido;
 - indicar comandos e resultado esperado;
 - explicar erros a partir das evidências;
-- revisar código escrito pelo usuário;
+- implementar código do produto quando autorizado pelo usuário;
+- revisar tanto código próprio quanto código escrito pelo usuário;
 - propor exercícios;
 - não avançar automaticamente de fase;
 - atualizar a documentação quando solicitado.
 
+Ao terminar cada tarefa ou fase, o agente deve apresentar:
+
+- resumo do objetivo e resultado;
+- todos os arquivos criados, alterados ou removidos;
+- descrição das mudanças relevantes por arquivo;
+- decisões de arquitetura e trade-offs;
+- testes executados e resultado;
+- riscos, limitações e próximos pontos de atenção;
+- explicação didática dos conceitos novos;
+- comandos para revisar, salvar e criar um commit granular.
+
+O usuário continua sendo responsável por ler, questionar, testar e confirmar cada lote. A implementação automática não elimina a revisão guiada.
+
 Por padrão, o agente não deve:
 
 - criar a aplicação inteira;
-- aplicar patches diretamente no código do produto;
 - esconder decisões em boilerplate;
 - pular testes;
 - adicionar abstrações antes de existir uma implementação simples.
 
-Quando o usuário pedir código, começar por um trecho pequeno, explicar linha por linha e deixar a adaptação para ele. Patches completos só com pedido explícito.
+Quando o usuário pedir uma tarefa de implementação, o agente pode aplicar patches completos para o lote solicitado. O lote deve permanecer limitado a uma fase ou capacidade relacionada; não juntar funcionalidades não testadas apenas para produzir mais código. A explicação detalhada vem no final da tarefa, e não precisa bloquear cada arquivo individualmente.
+
+## Formato de execução das tarefas
+
+1. Declarar o escopo do lote antes de alterar arquivos.
+2. Inspecionar o estado atual e preservar mudanças existentes.
+3. Implementar a capacidade completa do lote, incluindo tratamento de erro proporcional.
+4. Executar build, testes e verificações relevantes.
+5. Revisar diff, segurança, separação frontend/core e compatibilidade.
+6. Entregar o relatório didático completo.
+7. Fornecer comandos de commit granular.
+8. Esperar confirmação antes de iniciar a próxima fase.
 
 ## Regras invariáveis
 
@@ -59,6 +83,10 @@ Quando o usuário pedir código, começar por um trecho pequeno, explicar linha 
 - criar uma camada de services/composables para IPC;
 - usar Pinia somente quando o estado realmente atravessar muitas features;
 - começar com CSS simples antes de adotar um design system grande.
+- seguir `docs/design.md` para tema escuro, tokens, layout, iconografia e linguagem;
+- aplicar `.cursor/skills/ui-visual-system-validation/SKILL.md` em mudanças de UI, validando scroll por região, densidade, controles, ícones e acessibilidade;
+- não adicionar gradientes, emojis, sparkles, copy com travessão longo ou borda lateral decorativa;
+- validar foco, overflow, estados e densidade desktop antes de considerar uma tela pronta.
 
 ## Convenções Rust/Tauri
 
