@@ -7,6 +7,10 @@ defineProps<{
   requestName: string;
 }>();
 
+const emit = defineEmits<{
+  (event: "open-environment"): void;
+}>();
+
 type TauriWindow = ReturnType<typeof getCurrentWindow>;
 
 let appWindow: TauriWindow | null = null;
@@ -103,7 +107,17 @@ onMounted(refreshMaximizedState);
     </div>
 
     <div class="titlebar-right" @mousedown.stop @dblclick.stop>
-      <span class="titlebar-context">{{ environmentName || "Sem environment" }}</span>
+      <button
+        class="environment-trigger"
+        type="button"
+        :title="environmentName ? `Editar environment ${environmentName}` : 'Abrir environments'"
+        @click="emit('open-environment')"
+      >
+        <span>{{ environmentName || "Sem environment" }}</span>
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="m4 6 4 4 4-4" />
+        </svg>
+      </button>
       <button class="window-button" type="button" aria-label="Minimizar janela" title="Minimizar" @click="minimizeWindow">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10" /></svg>
       </button>
@@ -195,6 +209,43 @@ onMounted(refreshMaximizedState);
   font-size: 12px;
 }
 
+.environment-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  min-height: 30px;
+  border: 0;
+  border-radius: 5px;
+  padding: 0 7px;
+  color: var(--color-text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.environment-trigger:hover {
+  color: var(--color-text);
+  background: transparent;
+}
+
+.environment-trigger span {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.environment-trigger svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.2;
+}
+
 .window-button {
   display: inline-flex;
   align-items: center;
@@ -245,7 +296,7 @@ onMounted(refreshMaximizedState);
     display: none;
   }
 
-  .titlebar-context {
+  .environment-trigger {
     display: none;
   }
 }

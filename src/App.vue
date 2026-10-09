@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 
 import RequestEditor from "./features/request-editor/RequestEditor.vue";
 import ResponseViewer from "./features/response-viewer/ResponseViewer.vue";
 import AppTitlebar from "./features/shell/AppTitlebar.vue";
 import WorkspaceRail from "./features/shell/WorkspaceRail.vue";
+import AppModal from "./components/ui/AppModal.vue";
+import EnvironmentPanel from "./features/environments/EnvironmentPanel.vue";
 import WelcomeModal from "./features/onboarding/WelcomeModal.vue";
 import PostmanImportModal from "./features/onboarding/PostmanImportModal.vue";
+import CurlImportModal from "./features/onboarding/CurlImportModal.vue";
 import {
   executeRequest,
-  compareHistoryEntries,
   getHistoryEntry,
   getAppInfo,
   getSampleRequest,
@@ -18,18 +20,23 @@ import {
 import { formatIpcError } from "./services/errors";
 import type {
   AppInfo,
+  CollectionFolder,
   CollectionFile,
   EnvironmentFile,
-  HistoryComparison,
   HistorySummary,
   HttpResponse,
   RequestDefinition,
 } from "./types/api";
+import type { NewRequestDraft } from "./types/ui";
 
 const appInfo = ref<AppInfo | null>(null);
 const requestDraft = ref<RequestDefinition | null>(null);
 const sampleRequest = ref<RequestDefinition | null>(null);
 const collectionRequests = ref<RequestDefinition[]>([]);
+const collectionFolders = ref<CollectionFolder[]>([]);
+const collectionName = ref("Minha API");
+const collectionPath = ref("");
+const isCollectionDirty = ref(true);
 const activeRequestId = ref("");
 const response = ref<HttpResponse | null>(null);
 const isExecuting = ref(false);
@@ -38,10 +45,13 @@ const editorError = ref("");
 const resetToken = ref(0);
 const isWelcomeOpen = ref(false);
 const isPostmanImportOpen = ref(false);
+const isCurlImportOpen = ref(false);
+const isEnvironmentOpen = ref(false);
 const activeEnvironment = ref<EnvironmentFile | null>(null);
 const historyEntries = ref<HistorySummary[]>([]);
-const historyComparison = ref<HistoryComparison | null>(null);
 const isHistoryLoading = ref(false);
+
+const collectionDirty = computed(() => isCollectionDirty.value || !collectionPath.value);
 
 const ONBOARDING_STORAGE_KEY = "larry.onboarding.completed";
 
@@ -51,6 +61,99 @@ function cloneRequest(request: RequestDefinition) {
 
 function cloneEnvironment(environment: EnvironmentFile) {
   return JSON.parse(JSON.stringify(environment)) as EnvironmentFile;
+}
+
+function cloneFolder(folder: CollectionFolder): CollectionFolder {
+  return JSON.parse(JSON.stringify(folder)) as CollectionFolder;
+}
+
+function markCollectionDirty() {
+  isCollectionDirty.value = true;
+}
+
+function flattenFolderRequests(folders: CollectionFolder[]): RequestDefinition[] {
+  return folders.flatMap((folder) => [
+    ...folder.requests.map(cloneRequest),
+    ...flattenFolderRequests(folder.folders),
+  ]);
+}
+
+const allCollectionRequests = computed(() => [
+  ...collectionRequests.value.map(cloneRequest),
+  ...flattenFolderRequests(collectionFolders.value),
+]);
+
+function findRequestList(requestId: string): RequestDefinition[] | null {
+  if (collectionRequests.value.some((request) => request.id === requestId)) {
+    return collectionRequests.value;
+  }
+
+  function search(folders: CollectionFolder[]): RequestDefinition[] | null {
+    for (const folder of folders) {
+      if (folder.requests.some((request) => request.id === requestId)) {
+        return folder.requests;
+      }
+
+      const nested = search(folder.folders);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    return null;
+  }
+
+  return search(collectionFolders.value);
+}
+
+function findFolder(folderId: string, folders: CollectionFolder[]): CollectionFolder | null {
+  for (const folder of folders) {
+    if (folder.id === folderId) {
+      return folder;
+    }
+
+    const nested = findFolder(folderId, folder.folders);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+function countFolderRequests(folder: CollectionFolder): number {
+  return folder.requests.length + folder.folders.reduce(
+    (total, child) => total + countFolderRequests(child),
+    0,
+  );
+}
+
+function findFolderLocation(
+  folderId: string,
+  folders: CollectionFolder[] = collectionFolders.value,
+): { folders: CollectionFolder[]; index: number; folder: CollectionFolder } | null {
+  for (let index = 0; index < folders.length; index += 1) {
+    const folder = folders[index];
+    if (!folder) {
+      continue;
+    }
+
+    if (folder.id === folderId) {
+      return { folders, index, folder };
+    }
+
+    const nested = findFolderLocation(folderId, folder.folders);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+function folderContainsRequest(folder: CollectionFolder, requestId: string): boolean {
+  return folder.requests.some((request) => request.id === requestId)
+    || folder.folders.some((child) => folderContainsRequest(child, requestId));
 }
 
 function hasCompletedOnboarding() {
@@ -82,6 +185,9 @@ async function loadApplication() {
     sampleRequest.value = loadedRequest;
     requestDraft.value = cloneRequest(loadedRequest);
     collectionRequests.value = [cloneRequest(loadedRequest)];
+    collectionFolders.value = [];
+    collectionPath.value = "";
+    isCollectionDirty.value = true;
     activeRequestId.value = loadedRequest.id;
     await refreshHistory();
   } catch (error) {
@@ -104,15 +210,17 @@ async function refreshHistory() {
 function updateRequest(request: RequestDefinition) {
   requestDraft.value = request;
 
-  const requestIndex = collectionRequests.value.findIndex((item) => item.id === request.id);
-  if (requestIndex >= 0) {
-    collectionRequests.value[requestIndex] = cloneRequest(request);
+  const requestList = findRequestList(request.id);
+  const requestIndex = requestList?.findIndex((item) => item.id === request.id) ?? -1;
+  if (requestList && requestIndex >= 0) {
+    requestList[requestIndex] = cloneRequest(request);
   } else {
     collectionRequests.value.push(cloneRequest(request));
   }
 
   activeRequestId.value = request.id;
   editorError.value = "";
+  markCollectionDirty();
 }
 
 function resetRequest() {
@@ -121,26 +229,26 @@ function resetRequest() {
   }
 
   const restoredRequest = cloneRequest(sampleRequest.value);
-  const activeIndex = collectionRequests.value.findIndex(
-    (item) => item.id === activeRequestId.value,
-  );
+  const requestList = findRequestList(activeRequestId.value);
+  const activeIndex = requestList?.findIndex((item) => item.id === activeRequestId.value) ?? -1;
 
-  if (activeIndex >= 0) {
-    restoredRequest.id = collectionRequests.value[activeIndex].id;
-    collectionRequests.value[activeIndex] = cloneRequest(restoredRequest);
+  if (requestList && activeIndex >= 0) {
+    restoredRequest.id = requestList[activeIndex].id;
+    requestList[activeIndex] = cloneRequest(restoredRequest);
   } else {
     collectionRequests.value.push(cloneRequest(restoredRequest));
   }
 
   requestDraft.value = restoredRequest;
   activeRequestId.value = restoredRequest.id;
+  markCollectionDirty();
   response.value = null;
   editorError.value = "";
   resetToken.value += 1;
 }
 
 function selectCollectionRequest(requestId: string) {
-  const selectedRequest = collectionRequests.value.find((item) => item.id === requestId);
+  const selectedRequest = allCollectionRequests.value.find((item) => item.id === requestId);
   if (!selectedRequest) {
     return;
   }
@@ -152,14 +260,21 @@ function selectCollectionRequest(requestId: string) {
   resetToken.value += 1;
 }
 
-function loadCollection(collection: CollectionFile) {
-  if (collection.requests.length === 0) {
+function loadCollection(collection: CollectionFile, path = "") {
+  if (collection.requests.length === 0 && collection.folders.length === 0) {
     errorMessage.value = "A collection não possui requests executáveis para abrir.";
     return;
   }
 
+  collectionName.value = collection.name;
   collectionRequests.value = collection.requests.map(cloneRequest);
-  selectCollectionRequest(collectionRequests.value[0].id);
+  collectionFolders.value = collection.folders.map(cloneFolder);
+  collectionPath.value = path;
+  isCollectionDirty.value = !path;
+  const firstRequest = allCollectionRequests.value[0];
+  if (firstRequest) {
+    selectCollectionRequest(firstRequest.id);
+  }
 }
 
 function createRequestId() {
@@ -174,30 +289,50 @@ function createNewRequest(name = "Nova request"): RequestDefinition {
     url: "https://example.com",
     query: [],
     headers: [],
+    cookies: [],
     body: null,
+    auth: null,
+    assertions: [],
   };
 }
 
-function addCollectionRequest() {
-  const request = createNewRequest();
-  collectionRequests.value.push(request);
+function createCollectionRequest(draft: NewRequestDraft, folderId: string | null = null) {
+  if (draft.protocol !== "http") {
+    return;
+  }
+
+  const request = createNewRequest(draft.name);
+  request.method = draft.method;
+  request.url = draft.url;
+
+  const targetList = folderId
+    ? findFolder(folderId, collectionFolders.value)?.requests ?? null
+    : collectionRequests.value;
+  if (!targetList) {
+    return;
+  }
+
+  targetList.push(request);
+  markCollectionDirty();
   selectCollectionRequest(request.id);
 }
 
 function renameCollectionRequest(requestId: string, requestedName: string) {
   const name = requestedName.trim();
-  const requestIndex = collectionRequests.value.findIndex((item) => item.id === requestId);
+  const requestList = findRequestList(requestId);
+  const requestIndex = requestList?.findIndex((item) => item.id === requestId) ?? -1;
 
-  if (!name || requestIndex < 0) {
+  if (!name || !requestList || requestIndex < 0) {
     return;
   }
 
   const renamedRequest = {
-    ...collectionRequests.value[requestIndex],
+    ...requestList[requestIndex],
     name,
   };
 
-  collectionRequests.value[requestIndex] = cloneRequest(renamedRequest);
+  requestList[requestIndex] = cloneRequest(renamedRequest);
+  markCollectionDirty();
 
   if (requestDraft.value?.id === requestId) {
     requestDraft.value = cloneRequest(renamedRequest);
@@ -209,6 +344,9 @@ function startFreshRequest(name: string) {
   const request = createNewRequest(name);
   requestDraft.value = cloneRequest(request);
   collectionRequests.value = [cloneRequest(request)];
+  collectionFolders.value = [];
+  collectionPath.value = "";
+  markCollectionDirty();
   activeRequestId.value = request.id;
   response.value = null;
   editorError.value = "";
@@ -229,7 +367,7 @@ function closePostmanImport() {
 }
 
 function handlePostmanImported(collection: CollectionFile) {
-  if (collection.requests.length === 0) {
+  if (collection.requests.length === 0 && collection.folders.length === 0) {
     errorMessage.value = "A prévia Postman não possui requests executáveis para importar.";
     return;
   }
@@ -239,35 +377,138 @@ function handlePostmanImported(collection: CollectionFile) {
   completeOnboarding();
 }
 
+function openCurlImport() {
+  isCurlImportOpen.value = true;
+}
+
+function handleCurlImported(request: RequestDefinition) {
+  const importedRequest = cloneRequest(request);
+  importedRequest.id = createRequestId();
+  collectionRequests.value.push(importedRequest);
+  markCollectionDirty();
+  selectCollectionRequest(importedRequest.id);
+  isCurlImportOpen.value = false;
+}
+
 function updateEnvironment(environment: EnvironmentFile | null) {
   activeEnvironment.value = environment ? cloneEnvironment(environment) : null;
 }
 
 function duplicateCollectionRequest(requestId: string) {
-  const requestIndex = collectionRequests.value.findIndex((item) => item.id === requestId);
-  if (requestIndex < 0) {
+  const requestList = findRequestList(requestId);
+  const requestIndex = requestList?.findIndex((item) => item.id === requestId) ?? -1;
+  if (!requestList || requestIndex < 0) {
     return;
   }
 
-  const copy = cloneRequest(collectionRequests.value[requestIndex]);
+  const copy = cloneRequest(requestList[requestIndex]);
   copy.id = createRequestId();
   copy.name = `${copy.name} (cópia)`;
-  collectionRequests.value.splice(requestIndex + 1, 0, copy);
+  requestList.splice(requestIndex + 1, 0, copy);
+  markCollectionDirty();
   selectCollectionRequest(copy.id);
 }
 
 function removeCollectionRequest(requestId: string) {
-  const requestIndex = collectionRequests.value.findIndex((item) => item.id === requestId);
-  if (requestIndex < 0 || collectionRequests.value.length <= 1) {
+  const requestList = findRequestList(requestId);
+  const requestIndex = requestList?.findIndex((item) => item.id === requestId) ?? -1;
+  if (!requestList || requestIndex < 0 || allCollectionRequests.value.length <= 1) {
     return;
   }
 
-  collectionRequests.value.splice(requestIndex, 1);
+  requestList.splice(requestIndex, 1);
+  markCollectionDirty();
 
   if (activeRequestId.value === requestId) {
-    const nextRequest = collectionRequests.value[Math.max(0, requestIndex - 1)];
-    selectCollectionRequest(nextRequest.id);
+    const nextRequest = allCollectionRequests.value[Math.max(0, requestIndex - 1)] ?? allCollectionRequests.value[0];
+    if (nextRequest) {
+      selectCollectionRequest(nextRequest.id);
+    }
   }
+}
+
+function createFolder(name: string, parentFolderId: string | null = null) {
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    return;
+  }
+
+  const targetFolders = parentFolderId
+    ? findFolder(parentFolderId, collectionFolders.value)?.folders ?? null
+    : collectionFolders.value;
+  if (!targetFolders) {
+    return;
+  }
+
+  targetFolders.push({
+    id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: trimmedName,
+    requests: [],
+    folders: [],
+  });
+  markCollectionDirty();
+}
+
+function renameCollectionFolder(folderId: string, requestedName: string) {
+  const name = requestedName.trim();
+  const folder = findFolder(folderId, collectionFolders.value);
+  if (!folder || !name) {
+    return;
+  }
+
+  folder.name = name;
+  markCollectionDirty();
+}
+
+function removeCollectionFolder(folderId: string) {
+  const location = findFolderLocation(folderId);
+  if (!location) {
+    return;
+  }
+
+  const remainingRequests = allCollectionRequests.value.length - countFolderRequests(location.folder);
+  if (remainingRequests < 1) {
+    return;
+  }
+
+  const removedActiveRequest = folderContainsRequest(location.folder, activeRequestId.value);
+  location.folders.splice(location.index, 1);
+  markCollectionDirty();
+
+  if (removedActiveRequest) {
+    const nextRequest = allCollectionRequests.value[0];
+    if (nextRequest) {
+      selectCollectionRequest(nextRequest.id);
+    }
+  }
+}
+
+function moveCollectionRequest(requestId: string, folderId: string | null) {
+  const sourceList = findRequestList(requestId);
+  const sourceIndex = sourceList?.findIndex((request) => request.id === requestId) ?? -1;
+  const targetList = folderId
+    ? findFolder(folderId, collectionFolders.value)?.requests ?? null
+    : collectionRequests.value;
+
+  if (!sourceList || sourceIndex < 0 || !targetList || sourceList === targetList) {
+    return;
+  }
+
+  const [request] = sourceList.splice(sourceIndex, 1);
+  if (request) {
+    targetList.push(request);
+    markCollectionDirty();
+  }
+}
+
+function handleCollectionSaved(path: string) {
+  collectionPath.value = path;
+  isCollectionDirty.value = false;
+}
+
+function handleCollectionNameChange(name: string) {
+  collectionName.value = name;
+  markCollectionDirty();
 }
 
 async function runRequest() {
@@ -294,16 +535,7 @@ async function replayHistory(id: string) {
     const entry = await getHistoryEntry(id);
     updateRequest(cloneRequest(entry.request));
     response.value = entry.response;
-    historyComparison.value = null;
     editorError.value = entry.errorMessage ?? "";
-  } catch (error) {
-    editorError.value = formatIpcError(error);
-  }
-}
-
-async function compareHistory(leftId: string, rightId: string) {
-  try {
-    historyComparison.value = await compareHistoryEntries(leftId, rightId);
   } catch (error) {
     editorError.value = formatIpcError(error);
   }
@@ -334,10 +566,35 @@ onMounted(async () => {
     @imported="handlePostmanImported"
   />
 
+  <CurlImportModal
+    :open="isCurlImportOpen"
+    @close="isCurlImportOpen = false"
+    @imported="handleCurlImported"
+  />
+
+  <AppModal
+    :open="isEnvironmentOpen"
+    :keep-mounted="true"
+    size="wide"
+    kicker="ENVIRONMENT"
+    title="Variáveis do workspace"
+    description="Variáveis públicas ficam no arquivo local. Secrets continuam separados no armazenamento seguro do sistema."
+    primary-label="Fechar"
+    secondary-label=""
+    @close="isEnvironmentOpen = false"
+    @confirm="isEnvironmentOpen = false"
+  >
+    <EnvironmentPanel
+      :embedded="true"
+      @environment-changed="updateEnvironment"
+    />
+  </AppModal>
+
   <main class="app-shell">
     <AppTitlebar
       :environment-name="activeEnvironment?.name ?? ''"
       :request-name="requestDraft?.name ?? 'Carregando request'"
+      @open-environment="isEnvironmentOpen = true"
     />
 
     <p v-if="errorMessage" class="global-error">{{ errorMessage }}</p>
@@ -345,20 +602,23 @@ onMounted(async () => {
     <section v-if="requestDraft" class="workspace">
       <WorkspaceRail
         :requests="collectionRequests"
+        :folders="collectionFolders"
+        :collection-name="collectionName"
+        :collection-dirty="collectionDirty"
         :active-request-id="activeRequestId"
-        :history-entries="historyEntries"
-        :history-comparison="historyComparison"
-        :is-history-loading="isHistoryLoading"
         @select-request="selectCollectionRequest"
-        @add-request="addCollectionRequest"
+        @create-request="createCollectionRequest"
         @rename-request="renameCollectionRequest"
         @duplicate-request="duplicateCollectionRequest"
         @remove-request="removeCollectionRequest"
         @loaded-collection="loadCollection"
-        @environment-changed="updateEnvironment"
-        @refresh-history="refreshHistory"
-        @replay-history="replayHistory"
-        @compare-history="compareHistory"
+        @collection-saved="handleCollectionSaved"
+        @collection-name-change="handleCollectionNameChange"
+        @import-curl="openCurlImport"
+        @create-folder="createFolder"
+        @rename-folder="renameCollectionFolder"
+        @remove-folder="removeCollectionFolder"
+        @move-request="moveCollectionRequest"
       />
 
       <article class="panel request-panel">
@@ -374,9 +634,14 @@ onMounted(async () => {
       </article>
 
       <ResponseViewer
+        :request="requestDraft"
+        :environment="activeEnvironment"
         :response="response"
         :error="editorError"
         :is-loading="isExecuting"
+        :history-entries="historyEntries"
+        :is-history-loading="isHistoryLoading"
+        @replay-history="replayHistory"
       />
     </section>
 

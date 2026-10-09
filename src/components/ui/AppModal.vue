@@ -2,7 +2,7 @@
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 type ModalVariant = "neutral" | "info" | "danger" | "error";
-type ModalSize = "regular" | "wide";
+type ModalSize = "regular" | "wide" | "new-request";
 
 const props = withDefaults(
   defineProps<{
@@ -18,6 +18,7 @@ const props = withDefaults(
     closeOnBackdrop?: boolean;
     keepMounted?: boolean;
     size?: ModalSize;
+    showKicker?: boolean;
   }>(),
   {
     kicker: "",
@@ -30,6 +31,7 @@ const props = withDefaults(
     closeOnBackdrop: true,
     keepMounted: false,
     size: "regular",
+    showKicker: true,
   },
 );
 
@@ -142,7 +144,7 @@ onBeforeUnmount(() => {
         @keydown="handleKeydown"
       >
         <header class="modal-header">
-          <span class="modal-kicker">{{ props.kicker || (props.variant === "danger" ? "CONFIRMAÇÃO" : "ATENÇÃO") }}</span>
+          <span v-if="props.showKicker" class="modal-kicker">{{ props.kicker || (props.variant === "danger" ? "CONFIRMAÇÃO" : "ATENÇÃO") }}</span>
           <button class="modal-close" type="button" aria-label="Fechar modal" title="Fechar" @click="closeModal">
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="m4 4 8 8M12 4l-8 8" />
@@ -193,7 +195,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgb(5 7 10 / 76%);
+  background: color-mix(in srgb, var(--color-bg) 76%, transparent);
 }
 
 .app-modal {
@@ -203,11 +205,20 @@ onBeforeUnmount(() => {
   border: 1px solid var(--color-border-strong);
   border-radius: 8px;
   background: var(--color-surface-1);
-  box-shadow: 0 18px 48px rgb(0 0 0 / 36%);
+  box-shadow: 0 18px 48px var(--color-bg);
 }
 
 .app-modal-size-wide {
   width: min(720px, 100%);
+}
+
+.app-modal-size-new-request {
+  width: min(520px, 100%);
+}
+
+.app-modal-size-new-request .modal-body h2 {
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .modal-header,
@@ -314,27 +325,27 @@ onBeforeUnmount(() => {
 
 .modal-button-primary {
   border-color: var(--color-brand-strong);
-  color: #071315;
+  color: var(--color-bg);
   background: var(--color-brand);
   font-weight: 700;
 }
 
 .modal-button-primary:hover:not(:disabled) {
   border-color: var(--color-brand-strong);
-  color: #071315;
+  color: var(--color-bg);
   background: var(--color-brand);
 }
 
 .modal-button-danger {
-  border-color: #b8545e;
-  color: #fff;
-  background: #8f3541;
+  border-color: var(--color-danger);
+  color: var(--color-text);
+  background: var(--color-danger);
 }
 
 .modal-button-danger:hover:not(:disabled) {
-  border-color: #ef8585;
-  color: #fff;
-  background: #a8404d;
+  border-color: var(--color-danger);
+  color: var(--color-text);
+  background: var(--color-danger);
 }
 
 @media (max-width: 520px) {
