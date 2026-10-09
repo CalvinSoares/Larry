@@ -178,12 +178,12 @@ Evitar:
 ┌────────────────────────────────────────────────────────────────────┐
 │ LARRY / LOCAL WORKBENCH │ contexto ativo │ environment │ janela    │
 ├──────────────┬───────────────────────────────────────┬─────────────┤
-│ Request rail │ Composer                              │ Inspector   │
-│ Requests     │ método + URL + enviar                 │ status      │
-│ Local tools  │ tabs: Params · Headers · Body         │ body        │
-│              │ editor com scroll próprio             │ headers     │
+│ Collection   │ Composer                              │ Inspector   │
+│ tree         │ método + URL + enviar                 │ status      │
+│ folders      │ tabs: Params · Headers · Auth · Body │ body        │
+│ requests     │ editor com scroll próprio             │ headers     │
 │              │                                       │ trace       │
-│              │                                       │ diagnóstico │
+│              │                                       │ diagnostics │
 ├──────────────┴───────────────────────────────────────┴─────────────┤
 │ LOCAL FIRST · CORE HTTP · versão e plataforma                         │
 └──────────────┴───────────────────────────────────────┴─────────────┘
@@ -192,9 +192,11 @@ Evitar:
 Regiões:
 
 - **Topbar:** assinatura Larry, rota de contexto, environment e controles de janela. O estado de execução fica junto da ação `Enviar`, no Composer.
-- **Request rail:** abas `Requests` e `Ferramentas locais`; a segunda concentra collection file, environment e histórico, em vez de empilhar tudo.
+- **Collection tree:** uma única árvore persistente de folders e requests. Ações de arquivo e criação ficam no cabeçalho da collection; não existe uma aba separada de ferramentas locais.
+- pastas usam linhas compactas, chevron SVG e expansão local; requests dentro delas preservam sua ordem no YAML;
+- o menu contextual do cabeçalho oferece as ações que já têm fluxo real, como nova request, nova pasta e abertura do YAML;
 - **Composer:** método, URL, envio e configuração da request em abas.
-- **Inspector:** status, tempo, tamanho, body, headers, trace e diagnóstico.
+- **Inspector:** status, tempo, tamanho, histórico, body, headers, trace, diagnostics, Protocol Lab e Profiler.
 - **Statusbar:** dados locais de baixo ruído, fora dos três painéis de trabalho.
 
 Não usar uma faixa colorida lateral para indicar seleção. A seleção deve usar superfície diferente, texto e foco visível.
@@ -368,6 +370,24 @@ Regras de comportamento:
 - texto técnico nunca é substituído por uma mensagem genérica;
 - ação destrutiva precisa de verbo explícito e não usa apenas cor para comunicar risco.
 
+### 5.3. Selects e criação de requests
+
+O Larry não usa `<select>` nativo na interface de trabalho. Todo seletor deve usar o componente `CustomSelect`, com trigger de 32 px, superfície `--color-surface-1`, popover `--color-surface-2`, estado de navegação em `--color-surface-3` e foco em `--color-brand`.
+
+Contrato do `CustomSelect`:
+
+- a prop `label` fornece o nome acessível para o trigger e para o listbox;
+- o valor continua controlado por `v-model`, e mudanças também podem ser observadas pelo evento `change`;
+- `Enter`, Espaço, `ArrowUp`, `ArrowDown` e `Escape` funcionam no teclado;
+- clique fora fecha o popover e a seleção devolve foco ao trigger;
+- o chevron é SVG linear, nunca um caractere Unicode usado como ícone;
+- opções selecionadas exibem texto em `--color-brand` e um check SVG;
+- opções de método podem usar tipografia monoespacial e tons semânticos existentes.
+
+O botão `+` do cabeçalho da collection abre o modal compartilhado `NewRequestModal`. Ele é o ponto único para iniciar uma request HTTP, WebSocket, gRPC, SSE ou importar cURL. A V1 mantém o modal como entrada de fluxo: requests HTTP são inseridas na collection local, enquanto os outros protocolos abrem seus painéis existentes até que o modelo de collection suporte nós de protocolo versionados.
+
+O modal usa os tokens do Larry, mantém nome e URL editáveis, apresenta método HTTP com `CustomSelect` e sempre oferece `Cancelar` como saída segura. O menu de contexto da collection e a persistência de folders seguem o mesmo contrato local-first.
+
 ## 6. Design tokens
 
 ### Cores
@@ -476,32 +496,41 @@ Não manter botões de menu, início ou busca que ainda não têm comportamento.
 
 Quando houver statusbar, ela deve ocupar a largura total e permanecer separada do scroll dos painéis. Pode exibir ambiente, branch, encoding, quantidade de requests ou atalhos, mas não deve competir com o botão `Enviar`. Não duplicar na topbar um estado genérico como `Pronto`; se a informação não muda uma decisão do usuário, ela não merece ocupar o shell.
 
-### Sidebar
+### Sidebar e árvore da collection
 
 Prioridade visual:
 
 1. collection/workspace atual;
 2. busca;
 3. árvore de folders e requests;
-4. histórico recente;
-5. ações menos frequentes em menu contextual.
+4. ações menos frequentes em menu contextual.
 
-No Larry, o nome visual da sidebar é **Request rail**. Ela possui apenas duas abas de nível superior:
+No Larry, a sidebar possui um único propósito: a árvore da collection. Não há abas `Requests` e `Ferramentas locais`.
 
-1. **Requests:** collection ativa e sua lista de requests;
-2. **Ferramentas locais:** arquivo da collection, environment e histórico.
+O cabeçalho compacto da árvore contém:
 
-Essa separação evita que a árvore de requests seja empurrada para baixo por formulários de persistência e preserva o princípio de uma região por tarefa.
+- nome e ícone da collection;
+- ação de arquivo/Git para abrir o YAML local;
+- ação `+` para criar requests HTTP, WebSocket, gRPC e SSE ou importar cURL;
+- menu contextual por botão de overflow ou clique direito para criar request, criar pasta e abrir o YAML.
 
-### Ferramentas locais
+Requests de protocolos diferentes são irmãos na mesma árvore e usam badges curtos, como `GET`, `POST`, `WS`, `gRPC` e `SSE`. O menu da request mantém `Renomear`, `Duplicar`, `Mover para pasta` e `Remover` fora da linha principal.
 
-`Ferramentas locais` é um launcher compacto, não um formulário empilhado. Ele apresenta somente resumo e consequência:
+Folders também possuem um menu de overflow contextual, visível em hover, foco ou estado aberto, com `Nova request nesta pasta`, `Nova subpasta`, `Renomear` e `Remover`.
 
-- `Collection file`: YAML legível e Git local;
-- `Environment`: variáveis públicas e secrets separados;
-- `History`: execuções armazenadas no SQLite local.
+Criar uma request a partir de uma pasta mantém o destino contextual até a confirmação do modal; criar subpasta preserva a hierarquia recursiva no arquivo local.
 
-Cada item abre um modal persistente usando o template compartilhado. O estado do formulário continua montado enquanto o modal fecha, evitando perda silenciosa de edição. O modal deve ter título, descrição curta, botão de fechamento explícito, foco inicial, Escape e scroll próprio quando o conteúdo crescer.
+Remover uma pasta sempre exige confirmação e não pode deixar a collection sem nenhuma request executável. A remoção inclui as subpastas contidas e seleciona uma request restante quando a request ativa for afetada.
+
+O schema atual armazena requests de raiz e pastas recursivas. A expansão de cada pasta é estado local da sessão; a ordem e a hierarquia são preservadas no YAML quando a collection é salva.
+
+Arquivo da collection e environment são responsabilidades contextuais, não itens permanentes da navegação.
+
+O arquivo YAML abre em um modal persistente pelo botão do cabeçalho. O environment abre pela topbar, ao lado do seletor `Sem environment`. O estado do formulário continua montado enquanto o modal fecha, evitando perda silenciosa de edição.
+
+O fluxo file-first usa o diálogo nativo do sistema para abrir uma collection existente ou escolher o destino do primeiro salvamento. O caminho exibido é somente leitura depois da seleção. A collection exibe um indicador discreto de dirty state quando requests, folders ou nome foram alterados desde o último salvamento. O auto-save é uma preferência explícita, desativada por padrão, com debounce e sem criar um arquivo antes da escolha do destino.
+
+A revisão Git mostra duas camadas: o diff técnico original para investigação fiel e um diff semântico para leitura rápida. O segundo agrupa alterações por collection, folder, request e campo. Valores potencialmente sensíveis são omitidos ou mascarados, e uma falha de interpretação semântica nunca esconde o diff técnico.
 
 Rows:
 
@@ -627,7 +656,7 @@ Para protocolos diferentes:
 
 Não criar abas que apenas escondem um campo sem aumentar a compreensão.
 
-No MVP HTTP, a ordem real é `Params`, `Headers`, `Body`. Cada aba contém uma responsabilidade inteira e indica sua contagem quando isso ajuda a leitura. O nome da request fica acima das abas porque identifica a peça que está sendo editada, não uma configuração opcional.
+No MVP HTTP, a ordem real é `Params`, `Headers`, `Auth`, `Cookies`, `Body`. Cada aba contém uma responsabilidade inteira e indica sua contagem quando isso ajuda a leitura. A autenticação comum fica separada dos headers para deixar explícita a origem dos credentials e permitir a evolução para OAuth. Cookies ficam em uma aba própria porque são estado de sessão e não devem ser confundidos com headers arbitrários. O Body usa editor de código para JSON/texto e tabela compacta para forms, sem criar um segundo fluxo visual. O nome da request fica no contexto da topbar porque identifica a peça que está sendo editada, não uma configuração opcional.
 
 ### Response inspector
 
@@ -647,7 +676,44 @@ Depois:
 
 Status deve aparecer como texto. Cor é apoio, não substituto.
 
-No Larry, esse painel se chama **Inspector**. `Body`, `Headers`, `Trace` e `Diagnostics` são evidências da mesma execução e devem usar a mesma família visual de abas do Composer. O cabeçalho chama a atenção para o estado e para métricas medidas antes dos detalhes.
+No Larry, esse painel se chama **Inspector**. `Body`, `Headers`, `Trace`, `Diagnostics`, `Protocol Lab` e `Profiler` são evidências ou análises da mesma request e usam a mesma família visual de abas. O cabeçalho chama a atenção para o estado, as métricas medidas e um seletor compacto de histórico vindo do SQLite local.
+
+### Protocol Lab
+
+O Protocol Lab é uma aba técnica do Inspector que organiza a evidência da execução em quatro camadas: `Application`, `Transport`, `Internet` e `Network Access`. Ele acompanha a request e a resposta atuais sem retirar o usuário do fluxo de análise.
+
+Regras do painel:
+
+- mostrar primeiro a request atual e o estado da resposta;
+- separar fatos observados de explicações sobre a camada;
+- exibir a proveniência ao lado de cada fato importante;
+- usar `Indisponível` quando o adapter não mede aquela etapa;
+- nunca desenhar TCP, TLS, rota, Wi-Fi ou bytes físicos como se tivessem sido capturados quando não foram;
+- explicar que TTFB é o tempo observado até os headers e não prova o tempo exclusivo do servidor;
+- manter o painel denso, com blocos de evidência e leitura vertical, sem gráfico decorativo ou efeito de rede simulado;
+- reservar comparação HTTP/1.1, HTTP/2 e HTTP/3 para um contrato futuro de conexão e streams.
+
+O painel usa a mesma superfície e densidade do Inspector. A identidade do Larry aparece na hierarquia de evidências, na linguagem de proveniência e na separação entre medição e lacuna de observabilidade.
+
+### Profiler
+
+O Profiler é uma aba do Inspector. Ele opera sobre a request ativa, mantém os limites de segurança visíveis e não registra cada amostra no histórico normal. A aba deve mostrar destino, quantidade, concorrência, progresso, cancelamento e resumo estatístico sem transformar a sidebar em um launcher de ferramentas.
+
+### Comparação controlada de protocolos
+
+Quando houver uma resposta ou uma request pronta, o Protocol Lab pode oferecer uma ação explícita para comparar HTTP/1.1 e HTTP/2. Essa ação executa duas requests reais e deve deixar o destino visível antes do envio.
+
+Regras:
+
+- usar um único botão primário: `Comparar protocolos`;
+- explicar que serão feitas duas execuções contra o endpoint atual;
+- mostrar HTTP/1.1 e HTTP/2 em colunas equivalentes;
+- exibir status, versão observada, tempo, tamanho do body e erro de cada execução;
+- mostrar diferenças como `HTTP/2 - HTTP/1.1`, com unidade e direção;
+- não apresentar uma execução mais rápida como regra geral;
+- preservar o erro técnico do modo que falhou;
+- não gravar body, headers ou resultado resumido no histórico normal;
+- reservar conexões, streams, multiplexação e reuso para o laboratório HTTP/2 instrumentado.
 
 ### Trace timeline
 
@@ -793,8 +859,9 @@ O diferencial deve aparecer na hierarquia do response inspector, não em efeitos
 7. Padronizar SVGs de ação, chevrons, tooltips e estados de foco.
 8. Reposicionar a collection atual na sidebar.
 9. Mover Git para um painel contextual, sem competir com o editor.
-10. Criar response tabs para Body, Headers, Trace e Diagnostics.
-11. Implementar timeline com dados reais e provenance.
-12. Validar visualmente em 320, 360, 390, 414 e desktop antes de expandir protocolos.
+10. Criar response tabs para Body, Headers, Trace, Diagnostics, Protocol Lab e Profiler.
+11. Adicionar histórico compacto ao cabeçalho do Inspector.
+12. Implementar timeline com dados reais e provenance.
+13. Validar visualmente em 320, 360, 390, 414 e desktop antes de expandir protocolos.
 
 Este documento define o padrão visual. Qualquer exceção deve ser registrada em `docs/decisions.md` com motivo, impacto e alternativa considerada.
