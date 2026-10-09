@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use reqwest::{header, Client, Method, Url};
@@ -5,9 +6,13 @@ use serde::{Deserialize, Serialize};
 use tokio::net::lookup_host;
 use tokio::time::timeout;
 
-use crate::domain::request::{HttpMethod, RequestBody, RequestDefinition};
+use crate::domain::request::{
+    ApiKeyLocation, AssertionDefinition, CookieEntry, FormField, HttpMethod, MultipartBody,
+    RequestAuth, RequestBody, RequestDefinition,
+};
 
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_UPLOAD_BYTES: u64 = 20 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -26,8 +31,48 @@ pub struct HttpResponse {
     pub body: String,
     pub body_size: usize,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub assertions: Vec<AssertionResult>,
     pub trace: TraceInfo,
     pub diagnostics: Vec<DiagnosticEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HttpProtocol {
+    Auto,
+    Http1,
+    Http2,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpProtocolSample {
+    pub protocol: HttpProtocol,
+    pub status: Option<u16>,
+    pub status_text: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub body_size: Option<usize>,
+    pub http_version: Option<String>,
+    pub error: Option<ExecutionError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpProtocolComparison {
+    pub runs: Vec<HttpProtocolSample>,
+    pub duration_delta_ms: Option<i64>,
+    pub body_size_delta_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssertionResult {
+    pub assertion_type: String,
+    pub passed: bool,
+    pub summary: String,
+    pub expected: String,
+    pub actual: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -99,24 +144,41 @@ pub async fn execute_with_redactions(
     request: RequestDefinition,
     redactions: &[String],
 ) -> Result<HttpResponse, ExecutionError> {
+    execute_with_protocol(request, redactions, HttpProtocol::Auto).await
+}
+
+pub async fn execute_with_protocol(
+    request: RequestDefinition,
+    redactions: &[String],
+    protocol: HttpProtocol,
+) -> Result<HttpResponse, ExecutionError> {
     let parsed_url =
         validate_request(&request).map_err(|error| redact_execution_error(error, redactions))?;
     let trace_started = Instant::now();
     let dns = resolve_dns(&parsed_url, redactions).await?;
     let method = map_method(&request.method);
-    let client = Client::builder()
-        .timeout(REQUEST_TIMEOUT)
+    let client_builder = Client::builder().timeout(REQUEST_TIMEOUT);
+    let client_builder = match protocol {
+        HttpProtocol::Auto => client_builder,
+        HttpProtocol::Http1 => client_builder.http1_only(),
+        HttpProtocol::Http2 => client_builder.http2_prior_knowledge(),
+    };
+    let client = client_builder
         .build()
         .map_err(|error| ExecutionError::new("client", error.to_string()))?;
 
     let mut builder = client.request(method, parsed_url);
 
-    let query_params: Vec<(&str, &str)> = request
+    let mut query_params: Vec<(String, String)> = request
         .query
         .iter()
         .filter(|param| param.enabled && !param.name.trim().is_empty())
-        .map(|param| (param.name.as_str(), param.value.as_str()))
+        .map(|param| (param.name.clone(), param.value.clone()))
         .collect();
+
+    if let Some(auth) = request.auth.as_ref() {
+        append_auth_query(&mut query_params, auth)?;
+    }
 
     if !query_params.is_empty() {
         builder = builder.query(&query_params);
@@ -135,9 +197,19 @@ pub async fn execute_with_redactions(
         builder = builder.header(name, value);
     }
 
+    if let Some(cookie_header) = build_cookie_header(&request.cookies)? {
+        builder = builder.header(header::COOKIE, cookie_header);
+    }
+
+    builder = apply_auth(builder, request.auth.as_ref())?;
+
     builder = match request.body {
         Some(RequestBody::Json(value)) => builder.json(&value),
         Some(RequestBody::Text(value)) => builder.body(value),
+        Some(RequestBody::FormUrlEncoded(fields)) => builder.form(&build_form_fields(&fields)?),
+        Some(RequestBody::Multipart(multipart)) => {
+            builder.multipart(build_multipart_form(multipart).await?)
+        }
         None => builder,
     };
 
@@ -151,7 +223,7 @@ pub async fn execute_with_redactions(
     let status = response.status();
     let status_text = status.canonical_reason().unwrap_or_default().to_string();
     let http_version = format_http_version(response.version());
-    let headers = response
+    let headers: Vec<ResponseHeader> = response
         .headers()
         .iter()
         .map(|(name, value)| ResponseHeader {
@@ -163,6 +235,7 @@ pub async fn execute_with_redactions(
     let body_bytes = read_response_body(response).await?;
     let body_size = body_bytes.len();
     let body = String::from_utf8_lossy(&body_bytes).into_owned();
+    let assertions = evaluate_assertions(&request.assertions, status.as_u16(), &headers, &body);
     let download_ms = headers_received_at.elapsed().as_millis() as u64;
     let total_ms = trace_started.elapsed().as_millis() as u64;
 
@@ -173,6 +246,7 @@ pub async fn execute_with_redactions(
         body,
         body_size,
         duration_ms: total_ms,
+        assertions,
         trace: TraceInfo {
             phases: vec![
                 TracePhase {
@@ -233,6 +307,301 @@ pub async fn execute_with_redactions(
         },
         diagnostics: vec![diagnostic_for_status(status.as_u16(), &status_text)],
     })
+}
+
+pub async fn compare_http_protocols(
+    request: RequestDefinition,
+    redactions: &[String],
+) -> HttpProtocolComparison {
+    let mut runs = Vec::with_capacity(2);
+
+    for protocol in [HttpProtocol::Http1, HttpProtocol::Http2] {
+        let sample_protocol = protocol.clone();
+        let sample = match execute_with_protocol(request.clone(), redactions, protocol).await {
+            Ok(response) => HttpProtocolSample {
+                protocol: sample_protocol,
+                status: Some(response.status),
+                status_text: Some(response.status_text),
+                duration_ms: Some(response.duration_ms),
+                body_size: Some(response.body_size),
+                http_version: response.trace.http_version,
+                error: None,
+            },
+            Err(error) => HttpProtocolSample {
+                protocol: sample_protocol,
+                status: None,
+                status_text: None,
+                duration_ms: None,
+                body_size: None,
+                http_version: None,
+                error: Some(error),
+            },
+        };
+
+        runs.push(sample);
+    }
+
+    let duration_delta_ms = difference_between(
+        runs.first().and_then(|run| run.duration_ms),
+        runs.get(1).and_then(|run| run.duration_ms),
+    );
+    let body_size_delta_bytes = difference_between(
+        runs.first()
+            .and_then(|run| run.body_size.map(|size| size as u64)),
+        runs.get(1)
+            .and_then(|run| run.body_size.map(|size| size as u64)),
+    );
+
+    HttpProtocolComparison {
+        runs,
+        duration_delta_ms,
+        body_size_delta_bytes,
+    }
+}
+
+fn difference_between(left: Option<u64>, right: Option<u64>) -> Option<i64> {
+    Some(i64::try_from(right?).ok()? - i64::try_from(left?).ok()?)
+}
+
+fn evaluate_assertions(
+    definitions: &[AssertionDefinition],
+    status: u16,
+    headers: &[ResponseHeader],
+    body: &str,
+) -> Vec<AssertionResult> {
+    definitions
+        .iter()
+        .map(|definition| match definition {
+            AssertionDefinition::StatusEquals { expected } => AssertionResult {
+                assertion_type: "statusEquals".to_string(),
+                passed: status == *expected,
+                summary: "Status HTTP".to_string(),
+                expected: expected.to_string(),
+                actual: status.to_string(),
+            },
+            AssertionDefinition::HeaderContains { name, value } => {
+                let actual = headers
+                    .iter()
+                    .find(|header| header.name.eq_ignore_ascii_case(name))
+                    .map(|header| header.value.clone());
+                let passed = actual
+                    .as_ref()
+                    .is_some_and(|header_value| header_value.contains(value));
+
+                AssertionResult {
+                    assertion_type: "headerContains".to_string(),
+                    passed,
+                    summary: format!("Header {name}"),
+                    expected: format!("contém {value}"),
+                    actual: actual.unwrap_or_else(|| "header não encontrado".to_string()),
+                }
+            }
+            AssertionDefinition::BodyContains { value } => AssertionResult {
+                assertion_type: "bodyContains".to_string(),
+                passed: body.contains(value),
+                summary: "Conteúdo do body".to_string(),
+                expected: format!("contém {value}"),
+                actual: if body.contains(value) {
+                    "texto encontrado".to_string()
+                } else {
+                    "texto não encontrado".to_string()
+                },
+            },
+        })
+        .collect()
+}
+
+fn apply_auth(
+    builder: reqwest::RequestBuilder,
+    auth: Option<&RequestAuth>,
+) -> Result<reqwest::RequestBuilder, ExecutionError> {
+    match auth {
+        None => Ok(builder),
+        Some(RequestAuth::Bearer { token }) => Ok(builder.bearer_auth(token)),
+        Some(RequestAuth::Basic { username, password }) => {
+            Ok(builder.basic_auth(username, Some(password)))
+        }
+        Some(RequestAuth::ApiKey {
+            name,
+            value,
+            location: ApiKeyLocation::Header,
+        }) => {
+            let header_name = header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|error| ExecutionError::new("invalid_auth_name", error.to_string()))?;
+            let header_value = header::HeaderValue::from_str(value)
+                .map_err(|error| ExecutionError::new("invalid_auth_value", error.to_string()))?;
+
+            Ok(builder.header(header_name, header_value))
+        }
+        Some(RequestAuth::ApiKey {
+            location: ApiKeyLocation::Query,
+            ..
+        }) => Ok(builder),
+    }
+}
+
+fn append_auth_query(
+    query_params: &mut Vec<(String, String)>,
+    auth: &RequestAuth,
+) -> Result<(), ExecutionError> {
+    if let RequestAuth::ApiKey {
+        name,
+        value,
+        location: ApiKeyLocation::Query,
+    } = auth
+    {
+        validate_api_key_name(name)?;
+        query_params.push((name.clone(), value.clone()));
+    }
+
+    Ok(())
+}
+
+fn validate_api_key_name(name: &str) -> Result<(), ExecutionError> {
+    if name.trim().is_empty() {
+        return Err(ExecutionError::new(
+            "invalid_auth_name",
+            "O nome da API key não pode ficar vazio.",
+        ));
+    }
+
+    if header::HeaderName::from_bytes(name.as_bytes()).is_err()
+        && name.chars().any(|character| character.is_control())
+    {
+        return Err(ExecutionError::new(
+            "invalid_auth_name",
+            "O nome da API key contém caracteres inválidos.",
+        ));
+    }
+
+    Ok(())
+}
+
+fn build_cookie_header(
+    cookies: &[CookieEntry],
+) -> Result<Option<header::HeaderValue>, ExecutionError> {
+    let mut pairs = Vec::new();
+
+    for cookie in cookies
+        .iter()
+        .filter(|cookie| cookie.enabled && !cookie.name.trim().is_empty())
+    {
+        validate_cookie_name(&cookie.name)?;
+
+        if cookie.value.contains(';') || cookie.value.contains('\r') || cookie.value.contains('\n')
+        {
+            return Err(ExecutionError::new(
+                "invalid_cookie_value",
+                "O valor do cookie contém caracteres inválidos.",
+            ));
+        }
+
+        pairs.push(format!("{}={}", cookie.name.trim(), cookie.value));
+    }
+
+    if pairs.is_empty() {
+        return Ok(None);
+    }
+
+    let value = pairs.join("; ");
+    let header_value = header::HeaderValue::from_str(&value)
+        .map_err(|error| ExecutionError::new("invalid_cookie_value", error.to_string()))?;
+
+    Ok(Some(header_value))
+}
+
+fn validate_cookie_name(name: &str) -> Result<(), ExecutionError> {
+    if header::HeaderName::from_bytes(name.trim().as_bytes()).is_err() {
+        return Err(ExecutionError::new(
+            "invalid_cookie_name",
+            "O nome do cookie contém caracteres inválidos.",
+        ));
+    }
+
+    Ok(())
+}
+
+fn build_form_fields(fields: &[FormField]) -> Result<Vec<(String, String)>, ExecutionError> {
+    fields
+        .iter()
+        .filter(|field| field.enabled)
+        .map(|field| {
+            validate_form_field_name(&field.name)?;
+            Ok((field.name.trim().to_string(), field.value.clone()))
+        })
+        .collect()
+}
+
+async fn build_multipart_form(
+    body: MultipartBody,
+) -> Result<reqwest::multipart::Form, ExecutionError> {
+    let mut form = reqwest::multipart::Form::new();
+
+    for (name, value) in build_form_fields(&body.fields)? {
+        form = form.text(name, value);
+    }
+
+    for file in body.files.iter().filter(|file| file.enabled) {
+        validate_form_field_name(&file.name)?;
+        let path = file.path.trim();
+
+        if path.is_empty() {
+            return Err(ExecutionError::new(
+                "invalid_file_path",
+                "O caminho do arquivo multipart não pode ficar vazio.",
+            ));
+        }
+
+        let file_path = Path::new(path);
+        let metadata = tokio::fs::metadata(file_path).await.map_err(|error| {
+            ExecutionError::new(
+                "file_read",
+                format!("Não foi possível acessar o arquivo multipart: {error}"),
+            )
+        })?;
+
+        if !metadata.is_file() {
+            return Err(ExecutionError::new(
+                "file_read",
+                "O caminho multipart selecionado não aponta para um arquivo.",
+            ));
+        }
+
+        if metadata.len() > MAX_UPLOAD_BYTES {
+            return Err(ExecutionError::new(
+                "file_too_large",
+                "O arquivo multipart excede o limite local de 20 MiB.",
+            ));
+        }
+
+        let bytes = tokio::fs::read(file_path).await.map_err(|error| {
+            ExecutionError::new(
+                "file_read",
+                format!("Não foi possível ler o arquivo multipart: {error}"),
+            )
+        })?;
+        let file_name = file_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("upload.bin")
+            .to_string();
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
+
+        form = form.part(file.name.trim().to_string(), part);
+    }
+
+    Ok(form)
+}
+
+fn validate_form_field_name(name: &str) -> Result<(), ExecutionError> {
+    if name.trim().is_empty() || name.chars().any(|character| character.is_control()) {
+        return Err(ExecutionError::new(
+            "invalid_form_field_name",
+            "O nome do campo de formulário não pode ficar vazio ou conter caracteres de controle.",
+        ));
+    }
+
+    Ok(())
 }
 
 struct DnsResolution {
@@ -445,6 +814,7 @@ mod tests {
     use std::net::TcpListener;
 
     use super::*;
+    use crate::domain::request::{MultipartFile, RequestAuth};
 
     fn request(url: &str) -> RequestDefinition {
         RequestDefinition {
@@ -454,8 +824,75 @@ mod tests {
             url: url.to_string(),
             query: vec![],
             headers: vec![],
+            cookies: vec![],
             body: None,
+            auth: None,
+            assertions: vec![],
         }
+    }
+
+    #[test]
+    fn serializa_protocolos_de_comparacao() {
+        assert_eq!(
+            serde_json::to_string(&HttpProtocol::Auto).unwrap(),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HttpProtocol::Http1).unwrap(),
+            "\"http1\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HttpProtocol::Http2).unwrap(),
+            "\"http2\""
+        );
+    }
+
+    #[test]
+    fn calcula_delta_com_http2_menos_http1() {
+        assert_eq!(difference_between(Some(100), Some(120)), Some(20));
+        assert_eq!(difference_between(Some(120), Some(100)), Some(-20));
+        assert_eq!(difference_between(Some(100), None), None);
+    }
+
+    #[test]
+    fn avalia_assertions_de_status_header_e_body() {
+        let definitions = vec![
+            AssertionDefinition::StatusEquals { expected: 200 },
+            AssertionDefinition::HeaderContains {
+                name: "Content-Type".to_string(),
+                value: "application/json".to_string(),
+            },
+            AssertionDefinition::BodyContains {
+                value: "approved".to_string(),
+            },
+        ];
+        let headers = vec![ResponseHeader {
+            name: "content-type".to_string(),
+            value: "application/json; charset=utf-8".to_string(),
+        }];
+
+        let results = evaluate_assertions(&definitions, 200, &headers, "{\"state\":\"approved\"}");
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|result| result.passed));
+        assert_eq!(results[0].actual, "200");
+    }
+
+    #[test]
+    fn assertion_de_header_inexistente_falha_sem_expor_body() {
+        let results = evaluate_assertions(
+            &[AssertionDefinition::HeaderContains {
+                name: "X-Request-Id".to_string(),
+                value: "abc".to_string(),
+            }],
+            200,
+            &[],
+            "segredo que não deve aparecer",
+        );
+
+        assert!(!results[0].passed);
+        assert_eq!(results[0].actual, "header não encontrado");
+        assert!(!results[0].actual.contains("segredo"));
     }
 
     #[test]
@@ -476,6 +913,215 @@ mod tests {
         let error = validate_request(&request(" ")).unwrap_err();
 
         assert_eq!(error.kind, "invalid_url");
+    }
+
+    #[test]
+    fn aplica_bearer_auth_no_header() {
+        let client = Client::new();
+        let request = apply_auth(
+            client.get("http://localhost"),
+            Some(&RequestAuth::Bearer {
+                token: "local-token".to_string(),
+            }),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Bearer local-token"
+        );
+    }
+
+    #[test]
+    fn aplica_basic_auth_no_header() {
+        let client = Client::new();
+        let request = apply_auth(
+            client.get("http://localhost"),
+            Some(&RequestAuth::Basic {
+                username: "user".to_string(),
+                password: "password".to_string(),
+            }),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Basic dXNlcjpwYXNzd29yZA=="
+        );
+    }
+
+    #[test]
+    fn aplica_api_key_no_header() {
+        let client = Client::new();
+        let request = apply_auth(
+            client.get("http://localhost"),
+            Some(&RequestAuth::ApiKey {
+                name: "X-API-Key".to_string(),
+                value: "local-key".to_string(),
+                location: ApiKeyLocation::Header,
+            }),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+        assert_eq!(request.headers().get("x-api-key").unwrap(), "local-key");
+    }
+
+    #[test]
+    fn aplica_api_key_na_query() {
+        let mut query = Vec::new();
+        append_auth_query(
+            &mut query,
+            &RequestAuth::ApiKey {
+                name: "api_key".to_string(),
+                value: "local-key".to_string(),
+                location: ApiKeyLocation::Query,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            query,
+            vec![("api_key".to_string(), "local-key".to_string())]
+        );
+    }
+
+    #[test]
+    fn rejeita_api_key_sem_nome() {
+        let error = validate_api_key_name(" ").unwrap_err();
+
+        assert_eq!(error.kind, "invalid_auth_name");
+    }
+
+    #[test]
+    fn monta_cookie_header_apenas_com_cookies_habilitados() {
+        let header = build_cookie_header(&[
+            CookieEntry {
+                name: "session".to_string(),
+                value: "local-session".to_string(),
+                enabled: true,
+            },
+            CookieEntry {
+                name: "theme".to_string(),
+                value: "dark".to_string(),
+                enabled: false,
+            },
+            CookieEntry {
+                name: "locale".to_string(),
+                value: "pt-BR".to_string(),
+                enabled: true,
+            },
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            header.to_str().unwrap(),
+            "session=local-session; locale=pt-BR"
+        );
+    }
+
+    #[test]
+    fn rejeita_cookie_com_nome_invalido() {
+        let error = build_cookie_header(&[CookieEntry {
+            name: "session token".to_string(),
+            value: "local-session".to_string(),
+            enabled: true,
+        }])
+        .unwrap_err();
+
+        assert_eq!(error.kind, "invalid_cookie_name");
+    }
+
+    #[test]
+    fn rejeita_cookie_com_valor_invalido() {
+        let error = build_cookie_header(&[CookieEntry {
+            name: "session".to_string(),
+            value: "local;session".to_string(),
+            enabled: true,
+        }])
+        .unwrap_err();
+
+        assert_eq!(error.kind, "invalid_cookie_value");
+    }
+
+    #[test]
+    fn monta_form_urlencoded_apenas_com_campos_habilitados() {
+        let fields = build_form_fields(&[
+            FormField {
+                name: "email".to_string(),
+                value: "dev@example.com".to_string(),
+                enabled: true,
+            },
+            FormField {
+                name: "ignored".to_string(),
+                value: "value".to_string(),
+                enabled: false,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            fields,
+            vec![("email".to_string(), "dev@example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn rejeita_form_field_sem_nome() {
+        let error = build_form_fields(&[FormField {
+            name: " ".to_string(),
+            value: "value".to_string(),
+            enabled: true,
+        }])
+        .unwrap_err();
+
+        assert_eq!(error.kind, "invalid_form_field_name");
+    }
+
+    #[test]
+    fn le_arquivo_multipart_fixture_local() {
+        let path = std::env::temp_dir().join(format!(
+            "larry-multipart-{}-fixture.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"fixture").unwrap();
+
+        let result = tauri::async_runtime::block_on(build_multipart_form(MultipartBody {
+            fields: vec![FormField {
+                name: "description".to_string(),
+                value: "fixture".to_string(),
+                enabled: true,
+            }],
+            files: vec![MultipartFile {
+                name: "attachment".to_string(),
+                path: path.to_string_lossy().to_string(),
+                enabled: true,
+            }],
+        }));
+
+        std::fs::remove_file(path).unwrap();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rejeita_multipart_com_arquivo_inexistente() {
+        let result = tauri::async_runtime::block_on(build_multipart_form(MultipartBody {
+            fields: vec![],
+            files: vec![MultipartFile {
+                name: "attachment".to_string(),
+                path: "C:\\larry\\missing-file.txt".to_string(),
+                enabled: true,
+            }],
+        }));
+
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, "file_read");
     }
 
     #[test]
@@ -500,16 +1146,31 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
 
-        let result = tauri::async_runtime::block_on(execute(request(&format!(
-            "http://127.0.0.1:{port}/health"
-        ))))
-        .unwrap();
+        let mut fixture_request = request(&format!("http://127.0.0.1:{port}/health"));
+        fixture_request
+            .assertions
+            .push(AssertionDefinition::StatusEquals { expected: 200 });
+        fixture_request
+            .assertions
+            .push(AssertionDefinition::HeaderContains {
+                name: "Content-Type".to_string(),
+                value: "text/plain".to_string(),
+            });
+        fixture_request
+            .assertions
+            .push(AssertionDefinition::BodyContains {
+                value: "hello".to_string(),
+            });
+
+        let result = tauri::async_runtime::block_on(execute(fixture_request)).unwrap();
 
         server.join().unwrap();
 
         assert_eq!(result.status, 200);
         assert_eq!(result.body, "hello");
         assert_eq!(result.body_size, 5);
+        assert_eq!(result.assertions.len(), 3);
+        assert!(result.assertions.iter().all(|assertion| assertion.passed));
         assert_eq!(result.trace.http_version.as_deref(), Some("HTTP/1.1"));
         assert!(result
             .trace

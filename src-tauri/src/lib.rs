@@ -23,8 +23,20 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, Manager};
 
-use execution::http::{execute_with_redactions, ExecutionError, HttpResponse};
+use execution::grpc::{
+    execute_unary, inspect_proto, GrpcError, GrpcSchema, GrpcUnaryRequest, GrpcUnaryResponse,
+};
+use execution::http::{
+    compare_http_protocols as compare_http_protocols_execution, execute_with_redactions,
+    ExecutionError, HttpProtocolComparison, HttpResponse,
+};
+use execution::profiler::{cancel_profiler, start_profiler, ProfilerManager};
+use execution::sse::{close_sse, open_sse, SseManager};
 use execution::variables::resolve_request;
+use execution::websocket::{
+    close_websocket, open_websocket, send_websocket_message, WebSocketManager,
+};
+use integrations::curl::{parse_command, CurlImportError, CurlImportPreview};
 use integrations::git::{inspect_collection, GitError, GitSnapshot};
 use integrations::postman::{preview_collection, PostmanImportError, PostmanImportPreview};
 
@@ -64,10 +76,13 @@ fn get_sample_request() -> RequestDefinition {
             value: "application/json".to_string(),
             enabled: true,
         }],
+        cookies: vec![],
         body: Some(RequestBody::Json(json!({
             "amount": 100,
             "currency": "BRL"
         }))),
+        auth: None,
+        assertions: vec![],
     }
 }
 
@@ -108,6 +123,21 @@ async fn execute_request(
         &redactions,
     );
     result
+}
+
+#[tauri::command]
+async fn compare_http_protocols(
+    request: RequestDefinition,
+    environment: Option<EnvironmentFile>,
+) -> Result<HttpProtocolComparison, ExecutionError> {
+    let resolved =
+        resolve_request(request, environment.as_ref()).map_err(|error| ExecutionError {
+            kind: error.kind,
+            message: error.message,
+            diagnostic: None,
+        })?;
+
+    Ok(compare_http_protocols_execution(resolved.request, &resolved.redactions).await)
 }
 
 #[tauri::command]
@@ -215,14 +245,36 @@ fn preview_postman_collection(path: String) -> Result<PostmanImportPreview, Post
     preview_collection(&path)
 }
 
+#[tauri::command]
+fn parse_curl_request(command: String) -> Result<CurlImportPreview, CurlImportError> {
+    parse_command(&command)
+}
+
+#[tauri::command]
+fn inspect_grpc_proto(path: String) -> Result<GrpcSchema, GrpcError> {
+    inspect_proto(&path)
+}
+
+#[tauri::command]
+async fn execute_grpc_unary(request: GrpcUnaryRequest) -> Result<GrpcUnaryResponse, GrpcError> {
+    execute_unary(request).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(ProfilerManager::default())
+        .manage(SseManager::default())
+        .manage(WebSocketManager::default())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             get_sample_request,
             execute_request,
+            compare_http_protocols,
+            start_profiler,
+            cancel_profiler,
             list_history_entries,
             get_history_entry_command,
             compare_history_entry_command,
@@ -233,7 +285,15 @@ pub fn run() {
             set_environment_secret,
             delete_environment_secret,
             get_git_snapshot,
-            preview_postman_collection
+            preview_postman_collection,
+            parse_curl_request,
+            inspect_grpc_proto,
+            execute_grpc_unary,
+            open_sse,
+            close_sse,
+            open_websocket,
+            send_websocket_message,
+            close_websocket
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
