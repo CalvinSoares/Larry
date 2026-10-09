@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::request::{RequestBody, RequestDefinition};
+use crate::domain::request::{AssertionDefinition, RequestAuth, RequestBody, RequestDefinition};
 use crate::execution::http::{ExecutionError, HttpResponse, ResponseHeader};
 
 const MAX_HISTORY_BODY_BYTES: usize = 256 * 1024;
@@ -398,8 +398,40 @@ fn sanitize_request(request: &RequestDefinition, redactions: &[String]) -> Reque
             query.value = redact_known(query.value.clone(), redactions);
         }
     }
+    for cookie in &mut sanitized.cookies {
+        cookie.value = "<redacted>".to_string();
+    }
     if let Some(body) = &mut sanitized.body {
         sanitize_request_body(body, redactions);
+    }
+    if let Some(auth) = &mut sanitized.auth {
+        match auth {
+            RequestAuth::Bearer { token } => {
+                *token = "<redacted>".to_string();
+            }
+            RequestAuth::Basic { username, password } => {
+                *username = redact_known(username.clone(), redactions);
+                *password = "<redacted>".to_string();
+            }
+            RequestAuth::ApiKey { value, .. } => {
+                *value = "<redacted>".to_string();
+            }
+        }
+    }
+    for assertion in &mut sanitized.assertions {
+        match assertion {
+            AssertionDefinition::StatusEquals { .. } => {}
+            AssertionDefinition::HeaderContains { name, value } => {
+                if is_sensitive_name(name) {
+                    *value = "<redacted>".to_string();
+                } else {
+                    *value = redact_known(value.clone(), redactions);
+                }
+            }
+            AssertionDefinition::BodyContains { value } => {
+                *value = redact_known(value.clone(), redactions);
+            }
+        }
     }
     sanitized
 }
@@ -409,6 +441,27 @@ fn sanitize_request_body(body: &mut RequestBody, redactions: &[String]) {
         RequestBody::Json(value) => sanitize_json(value, redactions),
         RequestBody::Text(value) => {
             *value = redact_known(value.clone(), redactions);
+        }
+        RequestBody::FormUrlEncoded(fields) => {
+            for field in fields {
+                if is_sensitive_name(&field.name) {
+                    field.value = "<redacted>".to_string();
+                } else {
+                    field.value = redact_known(field.value.clone(), redactions);
+                }
+            }
+        }
+        RequestBody::Multipart(multipart) => {
+            for field in &mut multipart.fields {
+                if is_sensitive_name(&field.name) {
+                    field.value = "<redacted>".to_string();
+                } else {
+                    field.value = redact_known(field.value.clone(), redactions);
+                }
+            }
+            for file in &mut multipart.files {
+                file.path = "<redacted-file>".to_string();
+            }
         }
     }
 }
@@ -444,6 +497,15 @@ fn sanitize_response(response: &HttpResponse, redactions: &[String]) -> (HttpRes
             header.value = "<redacted>".to_string();
         } else {
             header.value = redact_known(header.value.clone(), redactions);
+        }
+    }
+    for assertion in &mut sanitized.assertions {
+        assertion.expected = redact_known(assertion.expected.clone(), redactions);
+        assertion.actual = redact_known(assertion.actual.clone(), redactions);
+        assertion.summary = redact_known(assertion.summary.clone(), redactions);
+        if assertion.assertion_type == "headerContains" && is_sensitive_name(&assertion.summary) {
+            assertion.expected = "<redacted>".to_string();
+            assertion.actual = "<redacted>".to_string();
         }
     }
 
@@ -518,7 +580,7 @@ fn database_error(error: rusqlite::Error) -> HistoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::request::{HttpMethod, RequestBody};
+    use crate::domain::request::{HttpMethod, RequestAuth, RequestBody};
 
     fn request() -> RequestDefinition {
         RequestDefinition {
@@ -528,9 +590,18 @@ mod tests {
             url: "http://localhost/health".to_string(),
             query: vec![],
             headers: vec![],
+            cookies: vec![crate::domain::request::CookieEntry {
+                name: "session".to_string(),
+                value: "do-not-store-cookie".to_string(),
+                enabled: true,
+            }],
             body: Some(RequestBody::Json(serde_json::json!({
                 "accessToken": "do-not-store"
             }))),
+            auth: Some(RequestAuth::Bearer {
+                token: "do-not-store".to_string(),
+            }),
+            assertions: vec![],
         }
     }
 
@@ -545,6 +616,7 @@ mod tests {
             body: body.to_string(),
             body_size: body.len(),
             duration_ms,
+            assertions: vec![],
             trace: crate::execution::http::TraceInfo {
                 phases: vec![],
                 resolved_addresses: vec![],
@@ -592,10 +664,16 @@ mod tests {
         let entry = get_history_entry(&path_string, &first.id).unwrap();
         let serialized = serde_json::to_string(&entry).unwrap();
         assert!(!serialized.contains("do-not-store"));
+        assert!(!serialized.contains("do-not-store-cookie"));
+        assert_eq!(entry.request.cookies[0].value, "<redacted>");
         let RequestBody::Json(body) = entry.request.body.as_ref().unwrap() else {
             panic!("o body do fixture deveria ser JSON");
         };
         assert_eq!(body["accessToken"], "<redacted>");
+        match entry.request.auth.as_ref().unwrap() {
+            RequestAuth::Bearer { token } => assert_eq!(token, "<redacted>"),
+            _ => panic!("o auth do fixture deveria ser bearer"),
+        }
 
         let comparison = compare_history_entries(&path_string, &first.id, &second.id).unwrap();
         assert!(comparison.status_changed);

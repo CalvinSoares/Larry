@@ -11,6 +11,7 @@ export function formatIpcError(value: unknown): string {
     const record = value as Record<string, unknown>;
     const kind = typeof record.kind === "string" ? record.kind : "";
     const message = typeof record.message === "string" ? record.message : "";
+    const technical = typeof record.technical === "string" ? record.technical : "";
     const diagnostic = record.diagnostic as Record<string, unknown> | undefined;
     const diagnosticSummary =
       diagnostic && typeof diagnostic.summary === "string"
@@ -27,7 +28,7 @@ export function formatIpcError(value: unknown): string {
       : "";
 
     if (kind && message) {
-      return `[${kind}] ${message}${diagnosticText}`;
+      return `[${kind}] ${message}${technical ? ` (${technical})` : ""}${diagnosticText}`;
     }
 
     if (message) {
