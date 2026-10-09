@@ -1,10 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { open } from "@tauri-apps/plugin-dialog";
 
+import { formatIpcError } from "../../services/errors";
+import { parseCurlRequest } from "../../services/ipc";
+import CustomSelect from "../../components/ui/CustomSelect.vue";
 import type {
+  AssertionDefinition,
+  FormField,
+  MultipartFile,
+  RequestAuth,
   RequestBody,
   RequestDefinition,
 } from "../../types/api";
+import type { CustomSelectOption } from "../../types/ui";
 
 const httpMethods = [
   "GET",
@@ -13,6 +22,30 @@ const httpMethods = [
   "PATCH",
   "DELETE",
 ] as const;
+
+const httpMethodOptions: CustomSelectOption[] = httpMethods.map((method) => ({
+  value: method,
+  label: method,
+  tone: method === "GET" ? "success" : method === "POST" || method === "DELETE" ? "warning" : "info",
+}));
+
+const authTypeOptions: CustomSelectOption[] = [
+  { value: "none", label: "No auth" },
+  { value: "bearer", label: "Bearer token", tone: "info" },
+  { value: "basic", label: "Basic auth" },
+  { value: "apiKey", label: "API key", tone: "warning" },
+];
+
+const apiKeyLocationOptions: CustomSelectOption[] = [
+  { value: "header", label: "Header" },
+  { value: "query", label: "Query" },
+];
+
+const assertionTypeOptions: CustomSelectOption[] = [
+  { value: "statusEquals", label: "Status é igual a" },
+  { value: "headerContains", label: "Header contém" },
+  { value: "bodyContains", label: "Body contém" },
+];
 
 const props = defineProps<{
   request: RequestDefinition;
@@ -28,14 +61,17 @@ const emit = defineEmits<{
 }>();
 
 const localRequest = ref<RequestDefinition>(cloneRequest(props.request));
-const bodyType = ref<"json" | "text" | "none">("json");
+const bodyType = ref<"json" | "text" | "form-urlencoded" | "multipart" | "none">("json");
 const bodyText = ref("");
 const bodyError = ref("");
+const formFields = ref<FormField[]>([]);
+const multipartFiles = ref<MultipartFile[]>([]);
+const formError = ref("");
 const isBodyMenuOpen = ref(false);
 const bodyEditor = ref<HTMLElement | null>(null);
 const bodyHighlight = ref<HTMLElement | null>(null);
 const bodyGutter = ref<HTMLElement | null>(null);
-type ComposerTab = "params" | "headers" | "body";
+type ComposerTab = "params" | "headers" | "auth" | "cookies" | "body" | "assertions";
 const activeTab = ref<ComposerTab>("params");
 
 type BodyFormat = "multipart" | "form-urlencoded" | "json" | "xml" | "text" | "sparql" | "binary" | "none";
@@ -46,17 +82,101 @@ const enabledParameterCount = computed(
 const enabledHeaderCount = computed(
   () => localRequest.value.headers.filter((header) => header.enabled).length,
 );
+const enabledCookieCount = computed(
+  () => localRequest.value.cookies.filter((cookie) => cookie.enabled).length,
+);
+const assertionCount = computed(() => localRequest.value.assertions.length);
 const bodyLineCount = computed(() => Math.max(1, bodyText.value.split("\n").length));
 const bodyFormatLabel = computed(() => {
   if (bodyType.value === "json") {
     return "JSON";
   }
 
-  return bodyType.value === "text" ? "TEXT" : "No Body";
+  if (bodyType.value === "text") {
+    return "TEXT";
+  }
+
+  if (bodyType.value === "form-urlencoded") {
+    return "FORM URLENCODED";
+  }
+
+  if (bodyType.value === "multipart") {
+    return "MULTIPART";
+  }
+
+  return "No Body";
+});
+type AuthType = "none" | RequestAuth["type"];
+const selectedAuthType = computed<AuthType>({
+  get: () => localRequest.value.auth?.type ?? "none",
+  set: (value) => setAuthType(value),
 });
 
 function cloneRequest(request: RequestDefinition) {
   return JSON.parse(JSON.stringify(request)) as RequestDefinition;
+}
+
+async function handleUrlPaste(event: ClipboardEvent) {
+  const pastedText = event.clipboardData?.getData("text").trim() ?? "";
+
+  if (!/^curl(?:\.exe)?\s/i.test(pastedText)) {
+    return;
+  }
+
+  event.preventDefault();
+
+  try {
+    const preview = await parseCurlRequest(pastedText);
+    const importedRequest = cloneRequest(preview.request);
+
+    importedRequest.id = localRequest.value.id;
+    importedRequest.name = localRequest.value.name;
+    localRequest.value = importedRequest;
+    loadBodyEditor(importedRequest.body);
+    emit("validation-error", "");
+  } catch (error) {
+    emit("validation-error", formatIpcError(error));
+  }
+}
+
+function createAuth(type: Exclude<AuthType, "none">): RequestAuth {
+  if (type === "bearer") {
+    return { type, token: "" };
+  }
+
+  if (type === "basic") {
+    return { type, username: "", password: "" };
+  }
+
+  return { type, name: "", value: "", location: "header" };
+}
+
+function setAuthType(type: AuthType) {
+  localRequest.value.auth = type === "none" ? null : createAuth(type);
+}
+
+function updateBearerToken(event: Event) {
+  if (localRequest.value.auth?.type === "bearer") {
+    localRequest.value.auth.token = (event.target as HTMLInputElement).value;
+  }
+}
+
+function updateBasicField(field: "username" | "password", event: Event) {
+  if (localRequest.value.auth?.type === "basic") {
+    localRequest.value.auth[field] = (event.target as HTMLInputElement).value;
+  }
+}
+
+function updateApiKeyField(field: "name" | "value", event: Event) {
+  if (localRequest.value.auth?.type === "apiKey") {
+    localRequest.value.auth[field] = (event.target as HTMLInputElement).value;
+  }
+}
+
+function updateApiKeyLocation(value: string) {
+  if (localRequest.value.auth?.type === "apiKey") {
+    localRequest.value.auth.location = value as "header" | "query";
+  }
 }
 
 function escapeHtml(value: string) {
@@ -137,10 +257,14 @@ function handleBodyInput(event: Event) {
 
 function selectBodyFormat(format: BodyFormat) {
   if (format !== "json" && format !== "text" && format !== "none") {
-    return;
+    if (format !== "multipart" && format !== "form-urlencoded") {
+      return;
+    }
   }
 
   bodyType.value = format;
+  bodyError.value = "";
+  formError.value = "";
   isBodyMenuOpen.value = false;
 }
 
@@ -159,19 +283,88 @@ function prettifyBody() {
 
 function loadBodyEditor(body: RequestBody | null) {
   bodyError.value = "";
+  formError.value = "";
 
   if (!body) {
     bodyType.value = "json";
     bodyText.value = "";
+    formFields.value = [];
+    multipartFiles.value = [];
     syncBodyEditor();
     return;
   }
 
   bodyType.value = body.type;
-  bodyText.value = body.type === "json"
-    ? JSON.stringify(body.value, null, 2)
-    : body.value;
+  if (body.type === "json") {
+    bodyText.value = JSON.stringify(body.value, null, 2);
+    formFields.value = [];
+    multipartFiles.value = [];
+  } else if (body.type === "text") {
+    bodyText.value = body.value;
+    formFields.value = [];
+    multipartFiles.value = [];
+  } else if (body.type === "form-urlencoded") {
+    bodyText.value = "";
+    formFields.value = body.value.map((field) => ({ ...field }));
+    multipartFiles.value = [];
+  } else {
+    bodyText.value = "";
+    formFields.value = body.value.fields.map((field) => ({ ...field }));
+    multipartFiles.value = body.value.files.map((file) => ({ ...file }));
+  }
   syncBodyEditor();
+}
+
+function addFormField() {
+  formFields.value.push({
+    name: "",
+    value: "",
+    enabled: true,
+  });
+  formError.value = "";
+}
+
+function removeFormField(index: number) {
+  formFields.value.splice(index, 1);
+}
+
+function removeMultipartFile(index: number) {
+  multipartFiles.value.splice(index, 1);
+}
+
+function fileNameFromPath(path: string) {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+async function chooseMultipartFile(index?: number) {
+  formError.value = "";
+
+  try {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      title: "Selecionar arquivo para multipart",
+    });
+    const path = Array.isArray(selected) ? selected[0] : selected;
+
+    if (!path) {
+      return;
+    }
+
+    if (index === undefined) {
+      multipartFiles.value.push({
+        name: "file",
+        path,
+        enabled: true,
+      });
+    } else {
+      multipartFiles.value[index].path = path;
+    }
+  } catch (error) {
+    formError.value = error instanceof Error
+      ? `Não foi possível selecionar o arquivo: ${error.message}`
+      : "Não foi possível selecionar o arquivo.";
+  }
 }
 
 function addHeader() {
@@ -186,6 +379,18 @@ function removeHeader(index: number) {
   localRequest.value.headers.splice(index, 1);
 }
 
+function addCookie() {
+  localRequest.value.cookies.push({
+    name: "",
+    value: "",
+    enabled: true,
+  });
+}
+
+function removeCookie(index: number) {
+  localRequest.value.cookies.splice(index, 1);
+}
+
 function addQueryParam() {
   localRequest.value.query.push({
     name: "",
@@ -196,6 +401,47 @@ function addQueryParam() {
 
 function removeQueryParam(index: number) {
   localRequest.value.query.splice(index, 1);
+}
+
+function createAssertion(type: AssertionDefinition["type"]): AssertionDefinition {
+  if (type === "statusEquals") {
+    return { type, expected: 200 };
+  }
+
+  if (type === "headerContains") {
+    return { type, name: "Content-Type", value: "application/json" };
+  }
+
+  return { type, value: "" };
+}
+
+function addAssertion() {
+  localRequest.value.assertions.push(createAssertion("statusEquals"));
+}
+
+function removeAssertion(index: number) {
+  localRequest.value.assertions.splice(index, 1);
+}
+
+function updateAssertionType(index: number, value: string) {
+  const type = value as AssertionDefinition["type"];
+  localRequest.value.assertions[index] = createAssertion(type);
+}
+
+function updateAssertionField(index: number, field: "expected" | "name" | "value", event: Event) {
+  const assertion = localRequest.value.assertions[index];
+  if (!assertion) {
+    return;
+  }
+
+  const value = (event.target as HTMLInputElement).value;
+  if (assertion.type === "statusEquals" && field === "expected") {
+    assertion.expected = Number(value) || 0;
+  } else if (assertion.type === "headerContains" && (field === "name" || field === "value")) {
+    assertion[field] = value;
+  } else if (assertion.type === "bodyContains" && field === "value") {
+    assertion.value = value;
+  }
 }
 
 function handleSubmit() {
@@ -216,11 +462,12 @@ watch(
   { deep: true },
 );
 
-watch([bodyType, bodyText], () => {
+watch([bodyType, bodyText, formFields, multipartFiles], () => {
   if (bodyType.value === "none") {
     localRequest.value.body = null;
     bodyText.value = "";
     bodyError.value = "";
+    formError.value = "";
     syncBodyEditor();
     return;
   }
@@ -229,6 +476,29 @@ watch([bodyType, bodyText], () => {
     localRequest.value.body = {
       type: "text",
       value: bodyText.value,
+    };
+    bodyError.value = "";
+    syncBodyEditor();
+    return;
+  }
+
+  if (bodyType.value === "form-urlencoded") {
+    localRequest.value.body = {
+      type: "form-urlencoded",
+      value: formFields.value.map((field) => ({ ...field })),
+    };
+    bodyError.value = "";
+    syncBodyEditor();
+    return;
+  }
+
+  if (bodyType.value === "multipart") {
+    localRequest.value.body = {
+      type: "multipart",
+      value: {
+        fields: formFields.value.map((field) => ({ ...field })),
+        files: multipartFiles.value.map((file) => ({ ...file })),
+      },
     };
     bodyError.value = "";
     syncBodyEditor();
@@ -253,7 +523,7 @@ watch([bodyType, bodyText], () => {
   }
 
   syncBodyEditor();
-});
+}, { deep: true });
 
 watch(activeTab, () => {
   if (activeTab.value === "body") {
@@ -276,24 +546,22 @@ onMounted(syncBodyEditor);
 <template>
   <form class="request-editor" @submit.prevent="handleSubmit">
     <div class="request-bar" aria-label="Barra de requisição">
-      <span class="request-method-control select-control">
-        <select v-model="localRequest.method" class="request-method" aria-label="Método">
-          <option v-for="method in httpMethods" :key="method" :value="method">
-            {{ method }}
-          </option>
-        </select>
-        <svg class="select-chevron" viewBox="0 0 16 16" aria-hidden="true">
-          <path d="m4 6 4 4 4-4" />
-        </svg>
-      </span>
+      <CustomSelect
+        v-model="localRequest.method"
+        class="request-method-custom-select"
+        :options="httpMethodOptions"
+        label="Método HTTP"
+        mono
+      />
 
       <input
         v-model="localRequest.url"
         class="request-url"
-        type="url"
+        type="text"
         aria-label="URL"
-        placeholder="https://example.com"
+        placeholder="https://example.com ou cole um comando cURL"
         required
+        @paste="handleUrlPaste"
       />
 
       <button class="primary-action" type="submit" :disabled="props.isExecuting || Boolean(bodyError)">
@@ -326,6 +594,28 @@ onMounted(syncBodyEditor);
       </button>
       <button
         class="composer-tab"
+        :class="{ 'composer-tab-active': activeTab === 'auth' }"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'auth'"
+        aria-controls="request-auth-panel"
+        @click="activeTab = 'auth'"
+      >
+        Auth
+      </button>
+      <button
+        class="composer-tab"
+        :class="{ 'composer-tab-active': activeTab === 'cookies' }"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'cookies'"
+        aria-controls="request-cookies-panel"
+        @click="activeTab = 'cookies'"
+      >
+        Cookies <span>{{ enabledCookieCount }}</span>
+      </button>
+      <button
+        class="composer-tab"
         :class="{ 'composer-tab-active': activeTab === 'body' }"
         type="button"
         role="tab"
@@ -334,6 +624,17 @@ onMounted(syncBodyEditor);
         @click="activeTab = 'body'"
       >
         Body <span>{{ localRequest.body ? 1 : 0 }}</span>
+      </button>
+      <button
+        class="composer-tab"
+        :class="{ 'composer-tab-active': activeTab === 'assertions' }"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'assertions'"
+        aria-controls="request-assertions-panel"
+        @click="activeTab = 'assertions'"
+      >
+        Tests <span>{{ assertionCount }}</span>
       </button>
     </nav>
 
@@ -419,7 +720,162 @@ onMounted(syncBodyEditor);
     </section>
 
     <section
-      v-else
+      v-else-if="activeTab === 'auth'"
+      id="request-auth-panel"
+      class="editor-section auth-section"
+      role="tabpanel"
+    >
+      <div class="section-heading">
+        <div>
+          <h3>Authentication</h3>
+          <p>Use referências como <code v-pre>{{secret.accessToken}}</code> para manter credenciais fora da collection.</p>
+        </div>
+
+        <CustomSelect
+          v-model="selectedAuthType"
+          class="auth-type-select"
+          :options="authTypeOptions"
+          label="Tipo de autenticação"
+        />
+      </div>
+
+      <div v-if="selectedAuthType === 'none'" class="auth-empty">
+        A request será enviada sem autenticação automática.
+      </div>
+
+      <div v-else-if="selectedAuthType === 'bearer'" class="auth-fields">
+        <label>
+          <span>Token</span>
+          <input
+            :value="localRequest.auth?.type === 'bearer' ? localRequest.auth.token : ''"
+            type="password"
+            autocomplete="off"
+            placeholder="{{secret.accessToken}}"
+            @input="updateBearerToken"
+          />
+        </label>
+        <p class="auth-note">Será enviado como o header Authorization: Bearer.</p>
+      </div>
+
+      <div v-else-if="selectedAuthType === 'basic'" class="auth-fields auth-grid">
+        <label>
+          <span>Username</span>
+          <input
+            :value="localRequest.auth?.type === 'basic' ? localRequest.auth.username : ''"
+            type="text"
+            autocomplete="off"
+            placeholder="usuario"
+            @input="updateBasicField('username', $event)"
+          />
+        </label>
+        <label>
+          <span>Password</span>
+          <input
+            :value="localRequest.auth?.type === 'basic' ? localRequest.auth.password : ''"
+            type="password"
+            autocomplete="off"
+            placeholder="{{secret.password}}"
+            @input="updateBasicField('password', $event)"
+          />
+        </label>
+        <p class="auth-note">As credenciais serão codificadas no header Authorization durante a execução.</p>
+      </div>
+
+      <div v-else class="auth-fields auth-grid">
+        <label>
+          <span>Key</span>
+          <input
+            :value="localRequest.auth?.type === 'apiKey' ? localRequest.auth.name : ''"
+            type="text"
+            autocomplete="off"
+            placeholder="X-API-Key"
+            @input="updateApiKeyField('name', $event)"
+          />
+        </label>
+        <label>
+          <span>Value</span>
+          <input
+            :value="localRequest.auth?.type === 'apiKey' ? localRequest.auth.value : ''"
+            type="password"
+            autocomplete="off"
+            placeholder="{{secret.apiKey}}"
+            @input="updateApiKeyField('value', $event)"
+          />
+        </label>
+        <label>
+          <span>Send in</span>
+          <CustomSelect
+            :model-value="localRequest.auth?.type === 'apiKey' ? localRequest.auth.location : 'header'"
+            :options="apiKeyLocationOptions"
+            label="Local do API key"
+            @update:model-value="updateApiKeyLocation"
+          />
+        </label>
+      </div>
+    </section>
+
+    <section
+      v-else-if="activeTab === 'cookies'"
+      id="request-cookies-panel"
+      class="editor-section cookies-section"
+      role="tabpanel"
+    >
+      <div class="section-heading">
+        <div>
+          <h3>Cookies</h3>
+          <p>Cookies habilitados serão enviados no header Cookie desta request.</p>
+        </div>
+
+        <button type="button" @click="addCookie">Adicionar</button>
+      </div>
+
+      <div class="params-table" role="table" aria-label="Cookies da request">
+        <div class="params-table-header" role="row">
+          <span role="columnheader" aria-label="Ativo"></span>
+          <span role="columnheader">Nome</span>
+          <span role="columnheader">Valor</span>
+          <span role="columnheader" aria-label="Ação"></span>
+        </div>
+
+        <div v-for="(cookie, index) in localRequest.cookies" :key="index" class="parameter-row" role="row">
+          <input
+            v-model="cookie.enabled"
+            type="checkbox"
+            :aria-label="`Habilitar cookie ${index + 1}`"
+          />
+          <input
+            v-model="cookie.name"
+            class="parameter-cell"
+            type="text"
+            placeholder="Nome"
+            :aria-label="`Nome do cookie ${index + 1}`"
+          />
+          <input
+            v-model="cookie.value"
+            class="parameter-cell"
+            type="text"
+            placeholder="Valor ou {{secret.cookie}}"
+            :aria-label="`Valor do cookie ${index + 1}`"
+          />
+          <button
+            class="icon-button"
+            type="button"
+            :aria-label="`Remover cookie ${index + 1}`"
+            :title="`Remover cookie ${index + 1}`"
+            @click="removeCookie(index)"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 5h10M6 5V3.5h4V5m-5.5 0 .6 8h5.8l.6-8M7 7.5v3.5m2-3.5v3.5" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <p v-if="localRequest.cookies.length === 0" class="muted">Nenhum cookie configurado.</p>
+    </section>
+
+    <section
+      v-else-if="activeTab === 'body'"
       id="request-body-panel"
       class="editor-section body-editor-section"
       role="tabpanel"
@@ -455,17 +911,37 @@ onMounted(syncBodyEditor);
 
             <div class="body-format-group">
               <span class="body-format-group-label">FORM</span>
-              <button class="body-format-option" type="button" role="menuitem" disabled>
+              <button
+                class="body-format-option"
+                :class="{ 'body-format-option-active': bodyType === 'multipart' }"
+                type="button"
+                role="menuitem"
+                :aria-checked="bodyType === 'multipart'"
+                @click="selectBodyFormat('multipart')"
+              >
                 <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3 4.5h10v7H3zM6 4.5v7m4-7v7" />
                 </svg>
                 Multipart Form
+                <svg v-if="bodyType === 'multipart'" class="body-format-check" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m3.5 8 3 3 6-6" />
+                </svg>
               </button>
-              <button class="body-format-option" type="button" role="menuitem" disabled>
+              <button
+                class="body-format-option"
+                :class="{ 'body-format-option-active': bodyType === 'form-urlencoded' }"
+                type="button"
+                role="menuitem"
+                :aria-checked="bodyType === 'form-urlencoded'"
+                @click="selectBodyFormat('form-urlencoded')"
+              >
                 <svg class="body-format-icon" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3 4.5h10v7H3zM5 7h6M5 9h4" />
                 </svg>
                 Form URL Encoded
+                <svg v-if="bodyType === 'form-urlencoded'" class="body-format-check" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m3.5 8 3 3 6-6" />
+                </svg>
               </button>
             </div>
 
@@ -552,7 +1028,11 @@ onMounted(syncBodyEditor);
         </button>
       </div>
 
-      <div class="body-code-editor" :class="{ 'body-code-editor-error': bodyError }">
+      <div
+        v-if="bodyType === 'json' || bodyType === 'text'"
+        class="body-code-editor"
+        :class="{ 'body-code-editor-error': bodyError }"
+      >
         <div ref="bodyGutter" class="body-editor-gutter" aria-hidden="true">
           <div class="body-gutter-content">
             <div v-for="lineNumber in bodyLineCount" :key="lineNumber" class="body-gutter-line">
@@ -573,15 +1053,244 @@ onMounted(syncBodyEditor);
           aria-multiline="true"
           aria-label="Conteúdo do body"
           :aria-invalid="Boolean(bodyError)"
-          :aria-readonly="bodyType === 'none'"
-          :contenteditable="bodyType !== 'none'"
+          :aria-readonly="false"
+          contenteditable="true"
           spellcheck="false"
           @input="handleBodyInput"
           @scroll="syncBodyScroll"
         ></div>
       </div>
 
+      <div v-else-if="bodyType === 'form-urlencoded'" class="form-body-editor">
+        <div class="form-body-heading">
+          <div>
+            <h3>Form fields</h3>
+            <p>Campos habilitados serão enviados como application/x-www-form-urlencoded.</p>
+          </div>
+          <button type="button" @click="addFormField">Adicionar campo</button>
+        </div>
+
+        <div class="params-table" role="table" aria-label="Campos form URL encoded">
+          <div class="params-table-header" role="row">
+            <span role="columnheader" aria-label="Ativo"></span>
+            <span role="columnheader">Nome</span>
+            <span role="columnheader">Valor</span>
+            <span role="columnheader" aria-label="Ação"></span>
+          </div>
+
+          <div v-for="(field, index) in formFields" :key="index" class="parameter-row" role="row">
+            <input
+              v-model="field.enabled"
+              type="checkbox"
+              :aria-label="`Habilitar campo ${index + 1}`"
+            />
+            <input
+              v-model="field.name"
+              class="parameter-cell"
+              type="text"
+              placeholder="Nome"
+              :aria-label="`Nome do campo ${index + 1}`"
+            />
+            <input
+              v-model="field.value"
+              class="parameter-cell"
+              type="text"
+              placeholder="Valor ou {{secret.field}}"
+              :aria-label="`Valor do campo ${index + 1}`"
+            />
+            <button
+              class="icon-button"
+              type="button"
+              :aria-label="`Remover campo ${index + 1}`"
+              :title="`Remover campo ${index + 1}`"
+              @click="removeFormField(index)"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M3 5h10M6 5V3.5h4V5m-5.5 0 .6 8h5.8l.6-8M7 7.5v3.5m2-3.5v3.5" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <p v-if="formFields.length === 0" class="muted">Nenhum campo configurado.</p>
+      </div>
+
+      <div v-else-if="bodyType === 'multipart'" class="form-body-editor">
+        <div class="form-body-heading">
+          <div>
+            <h3>Multipart form</h3>
+            <p>Combine campos de texto e arquivos locais no mesmo envio.</p>
+          </div>
+          <button type="button" @click="addFormField">Adicionar campo</button>
+        </div>
+
+        <div class="params-table" role="table" aria-label="Campos multipart">
+          <div class="params-table-header" role="row">
+            <span role="columnheader" aria-label="Ativo"></span>
+            <span role="columnheader">Nome</span>
+            <span role="columnheader">Valor</span>
+            <span role="columnheader" aria-label="Ação"></span>
+          </div>
+
+          <div v-for="(field, index) in formFields" :key="index" class="parameter-row" role="row">
+            <input
+              v-model="field.enabled"
+              type="checkbox"
+              :aria-label="`Habilitar campo multipart ${index + 1}`"
+            />
+            <input
+              v-model="field.name"
+              class="parameter-cell"
+              type="text"
+              placeholder="Nome"
+              :aria-label="`Nome do campo multipart ${index + 1}`"
+            />
+            <input
+              v-model="field.value"
+              class="parameter-cell"
+              type="text"
+              placeholder="Valor ou {{secret.field}}"
+              :aria-label="`Valor do campo multipart ${index + 1}`"
+            />
+            <button
+              class="icon-button"
+              type="button"
+              :aria-label="`Remover campo multipart ${index + 1}`"
+              :title="`Remover campo multipart ${index + 1}`"
+              @click="removeFormField(index)"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M3 5h10M6 5V3.5h4V5m-5.5 0 .6 8h5.8l.6-8M7 7.5v3.5m2-3.5v3.5" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="multipart-files-heading">
+          <div>
+            <h3>Arquivos</h3>
+            <p>O caminho é lido pelo core Rust somente durante a execução.</p>
+          </div>
+          <button type="button" @click="chooseMultipartFile()">Selecionar arquivo</button>
+        </div>
+
+        <div v-for="(file, index) in multipartFiles" :key="index" class="multipart-file-row">
+          <input
+            v-model="file.enabled"
+            type="checkbox"
+            :aria-label="`Habilitar arquivo ${index + 1}`"
+          />
+          <input
+            v-model="file.name"
+            class="parameter-cell"
+            type="text"
+            placeholder="Nome do campo"
+            :aria-label="`Nome do campo do arquivo ${index + 1}`"
+          />
+          <button
+            class="multipart-file-path"
+            type="button"
+            :title="file.path"
+            @click="chooseMultipartFile(index)"
+          >
+            {{ fileNameFromPath(file.path) }}
+          </button>
+          <button
+            class="icon-button"
+            type="button"
+            :aria-label="`Remover arquivo ${index + 1}`"
+            :title="`Remover arquivo ${index + 1}`"
+            @click="removeMultipartFile(index)"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 5h10M6 5V3.5h4V5m-5.5 0 .6 8h5.8l.6-8M7 7.5v3.5m2-3.5v3.5" />
+            </svg>
+          </button>
+        </div>
+
+        <p v-if="multipartFiles.length === 0" class="muted">Nenhum arquivo selecionado.</p>
+      </div>
+
+      <div v-else class="body-empty-state">
+        Esta request não possui body.
+      </div>
+
       <p v-if="bodyError" class="field-error">{{ bodyError }}</p>
+      <p v-if="formError" class="field-error">{{ formError }}</p>
+    </section>
+
+    <section
+      v-else
+      id="request-assertions-panel"
+      class="editor-section assertions-section"
+      role="tabpanel"
+    >
+      <div class="section-heading">
+        <div>
+          <h3>Assertions</h3>
+          <p>Verificações locais executadas depois que a resposta chegar.</p>
+        </div>
+        <button type="button" @click="addAssertion">Adicionar</button>
+      </div>
+
+      <div v-if="localRequest.assertions.length" class="assertion-list">
+        <div v-for="(assertion, index) in localRequest.assertions" :key="index" class="assertion-row">
+          <CustomSelect
+            :model-value="assertion.type"
+            :options="assertionTypeOptions"
+            :label="`Tipo da assertion ${index + 1}`"
+            @update:model-value="updateAssertionType(index, $event)"
+          />
+
+          <input
+            v-if="assertion.type === 'statusEquals'"
+            :value="assertion.expected"
+            type="number"
+            min="100"
+            max="599"
+            placeholder="200"
+            :aria-label="`Status esperado da assertion ${index + 1}`"
+            @input="updateAssertionField(index, 'expected', $event)"
+          />
+          <template v-else-if="assertion.type === 'headerContains'">
+            <input
+              :value="assertion.name"
+              type="text"
+              placeholder="Nome do header"
+              :aria-label="`Nome do header da assertion ${index + 1}`"
+              @input="updateAssertionField(index, 'name', $event)"
+            />
+            <input
+              :value="assertion.value"
+              type="text"
+              placeholder="Valor esperado"
+              :aria-label="`Valor do header da assertion ${index + 1}`"
+              @input="updateAssertionField(index, 'value', $event)"
+            />
+          </template>
+          <input
+            v-else
+            :value="assertion.value"
+            type="text"
+            placeholder="Texto esperado no body"
+            :aria-label="`Texto esperado da assertion ${index + 1}`"
+            @input="updateAssertionField(index, 'value', $event)"
+          />
+
+          <button
+            class="icon-button"
+            type="button"
+            :aria-label="`Remover assertion ${index + 1}`"
+            :title="`Remover assertion ${index + 1}`"
+            @click="removeAssertion(index)"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 5h10M6 5V3.5h4V5m-5.5 0 .6 8h5.8l.6-8M7 7.5v3.5m2-3.5v3.5" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <p v-else class="muted">Nenhuma assertion configurada.</p>
     </section>
   </form>
 </template>
@@ -599,30 +1308,20 @@ onMounted(syncBodyEditor);
   align-items: stretch;
   width: 100%;
   min-height: 36px;
-  overflow: hidden;
+  position: relative;
+  z-index: 20;
+  overflow: visible;
   border: 1px solid var(--color-border-strong);
   border-radius: 6px;
   background: var(--color-surface-2);
 }
 
-.request-method-control {
-  flex: 0 0 85px;
-}
-
-.request-method,
 .request-url {
   min-width: 0;
   min-height: 34px;
   border: 0;
   border-radius: 0;
   background: transparent;
-}
-
-.request-method {
-  color: var(--color-success);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
-  font-weight: 800;
 }
 
 .request-url {
@@ -634,20 +1333,31 @@ onMounted(syncBodyEditor);
   font-size: 12px;
 }
 
-.request-url:focus,
-.request-method:focus {
+.request-url:focus {
   outline: none;
 }
 
-.request-bar .select-chevron {
-  right: 10px;
+.request-method-custom-select {
+  flex: 0 0 96px;
+}
+
+.request-bar .request-method-custom-select :deep(.custom-select-trigger) {
+  height: 34px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.request-bar .request-method-custom-select :deep(.custom-select-trigger:hover:not(:disabled)) {
+  border: 0;
+  background: transparent;
 }
 
 .request-bar .primary-action {
   flex: 0 0 auto;
   min-height: 34px;
   border: 0;
-  border-radius: 0;
+  border-radius: 0 5px 5px 0;
   padding: 0 16px;
 }
 
@@ -655,7 +1365,7 @@ onMounted(syncBodyEditor);
   border: 0;
 }
 
-.request-method-control,
+.request-method-custom-select,
 .request-url,
 .request-bar .primary-action {
   min-width: 0;
@@ -673,6 +1383,70 @@ onMounted(syncBodyEditor);
   flex: 1 1 auto;
   min-height: 0;
   gap: 8px;
+}
+
+.form-body-editor {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.form-body-heading,
+.multipart-files-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.form-body-heading h3,
+.multipart-files-heading h3 {
+  margin: 0;
+}
+
+.form-body-heading p,
+.multipart-files-heading p {
+  margin: 4px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.multipart-file-row {
+  display: grid;
+  grid-template-columns: 24px minmax(120px, 0.8fr) minmax(0, 2fr) 28px;
+  gap: 8px;
+  align-items: center;
+}
+
+.multipart-file-path {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  padding: 6px 10px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-2);
+  font-size: 12px;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+
+.multipart-file-path:hover:not(:disabled) {
+  border-color: var(--color-brand);
+  color: var(--color-text);
+  background: var(--color-surface-2);
+}
+
+.body-empty-state {
+  display: grid;
+  min-height: 220px;
+  flex: 1 1 auto;
+  place-items: center;
+  color: var(--color-text-muted);
+  background: #0d0f12;
+  font-size: 12px;
 }
 
 .composer-tabs {
@@ -732,8 +1506,81 @@ onMounted(syncBodyEditor);
   font-size: 13px;
 }
 
-input,
-select {
+.auth-section {
+  max-width: 760px;
+}
+
+.assertions-section {
+  max-width: 900px;
+}
+
+.assertion-list {
+  display: grid;
+  gap: 8px;
+}
+
+.assertion-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.9fr) minmax(120px, 1fr) minmax(0, 1.2fr) 28px;
+  gap: 8px;
+  align-items: center;
+}
+
+.assertion-row .custom-select,
+.assertion-row input {
+  min-width: 0;
+}
+
+.auth-type-select {
+  width: 150px;
+  flex: 0 0 150px;
+}
+
+.auth-empty {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 14px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-2);
+  font-size: 12px;
+}
+
+.auth-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 620px;
+}
+
+.auth-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+}
+
+.auth-grid label:last-of-type {
+  grid-column: 1 / -1;
+}
+
+.auth-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.auth-fields label span {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.auth-note {
+  margin: 0;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+}
+
+input {
   box-sizing: border-box;
   width: 100%;
   min-height: 34px;
@@ -743,32 +1590,6 @@ select {
   font: inherit;
   background: var(--color-surface-2);
   color: var(--color-text);
-}
-
-.select-control {
-  position: relative;
-  display: block;
-  min-width: 0;
-}
-
-.select-control select {
-  appearance: none;
-  padding-right: 30px;
-}
-
-.select-chevron {
-  position: absolute;
-  top: 50%;
-  right: 9px;
-  width: 14px;
-  height: 14px;
-  pointer-events: none;
-  fill: none;
-  stroke: var(--color-text-muted);
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.2;
-  transform: translateY(-50%);
 }
 
 input::placeholder {
@@ -1231,12 +2052,42 @@ button:disabled {
     min-width: 0;
   }
 
-  .request-method-control {
+  .request-method-custom-select {
     flex-basis: 76px;
   }
 
   .request-bar .primary-action {
     padding: 0 10px;
+  }
+
+  .auth-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .assertion-row {
+    grid-template-columns: 1fr 28px;
+  }
+
+  .assertion-row .custom-select,
+  .assertion-row input {
+    grid-column: auto;
+  }
+
+  .auth-grid label:last-of-type {
+    grid-column: auto;
+  }
+
+  .form-body-heading,
+  .multipart-files-heading {
+    flex-direction: column;
+  }
+
+  .multipart-file-row {
+    grid-template-columns: 24px minmax(0, 1fr) 28px;
+  }
+
+  .multipart-file-path {
+    grid-column: 2 / -1;
   }
 
   input[type="checkbox"] {

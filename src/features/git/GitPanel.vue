@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 
 import { getGitSnapshot } from "../../services/ipc";
 import { formatIpcError } from "../../services/errors";
-import type { GitSnapshot } from "../../types/api";
+import type { GitSemanticChange, GitSnapshot } from "../../types/api";
 
 const props = defineProps<{
   path: string;
@@ -12,6 +12,31 @@ const props = defineProps<{
 const snapshot = ref<GitSnapshot | null>(null);
 const isLoading = ref(false);
 const error = ref("");
+const semanticChangeCount = computed(() => snapshot.value?.semanticChanges.length ?? 0);
+
+function changeLabel(change: GitSemanticChange) {
+  if (change.changeType === "added") {
+    return "Adicionado";
+  }
+
+  if (change.changeType === "removed") {
+    return "Removido";
+  }
+
+  return "Alterado";
+}
+
+function semanticEmptyMessage(snapshotValue: GitSnapshot) {
+  if (snapshotValue.semanticBase === "HEAD") {
+    return "Nenhuma mudança semântica encontrada.";
+  }
+
+  if (snapshotValue.semanticBase.startsWith("Indisponível:")) {
+    return snapshotValue.semanticBase;
+  }
+
+  return "Não há uma versão HEAD para comparar.";
+}
 
 async function inspectGit() {
   error.value = "";
@@ -63,7 +88,32 @@ async function inspectGit() {
       <h4>Status</h4>
       <pre>{{ snapshot.status || "Working tree limpo." }}</pre>
 
-      <h4>Diff da collection</h4>
+      <h4>Diff semântico</h4>
+      <p class="semantic-base">Comparação com {{ snapshot.semanticBase }}.</p>
+
+      <div v-if="semanticChangeCount" class="semantic-list" aria-live="polite">
+        <article
+          v-for="(change, index) in snapshot.semanticChanges"
+          :key="`${change.target}-${change.field}-${index}`"
+          class="semantic-change"
+          :class="`semantic-change-${change.changeType}`"
+        >
+          <div class="semantic-change-heading">
+            <span class="semantic-change-type">{{ changeLabel(change) }}</span>
+            <strong>{{ change.target }}</strong>
+            <span class="semantic-change-field">{{ change.field }}</span>
+          </div>
+          <div v-if="change.before || change.after" class="semantic-change-values">
+            <span v-if="change.before" class="semantic-before">{{ change.before }}</span>
+            <span v-if="change.after" class="semantic-after">{{ change.after }}</span>
+          </div>
+        </article>
+      </div>
+      <p v-else class="semantic-empty">
+        {{ semanticEmptyMessage(snapshot) }}
+      </p>
+
+      <h4>Diff técnico</h4>
       <pre>{{ snapshot.diff || "Nenhuma diferença rastreada para este arquivo." }}</pre>
     </div>
   </section>
@@ -136,6 +186,96 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.semantic-base,
+.semantic-empty {
+  margin: -4px 0 0;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+}
+
+.semantic-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.semantic-change {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  padding: 7px 8px;
+  background: var(--color-surface-2);
+}
+
+.semantic-change-heading,
+.semantic-change-values {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.semantic-change-type {
+  color: var(--color-brand);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.semantic-change-removed .semantic-change-type {
+  color: var(--color-danger);
+}
+
+.semantic-change-added .semantic-change-type {
+  color: var(--color-success);
+}
+
+.semantic-change-heading strong,
+.semantic-change-field {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.semantic-change-heading strong {
+  min-width: 0;
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.semantic-change-field {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.semantic-change-values {
+  color: var(--color-text-subtle);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.semantic-before,
+.semantic-after {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.semantic-before::before {
+  content: "Antes: ";
+  color: var(--color-danger);
+  font-family: inherit;
+}
+
+.semantic-after::before {
+  content: "Depois: ";
+  color: var(--color-success);
+  font-family: inherit;
 }
 
 .git-meta {
