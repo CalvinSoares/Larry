@@ -20,18 +20,28 @@ Ele combina um editor de requests com evidências técnicas de execução: DNS, 
 O MVP atual inclui:
 
 - requests HTTP e HTTPS com GET, POST, PUT, PATCH e DELETE;
-- query params, headers e body JSON/texto;
+- query params, headers, cookies e body JSON, texto e forms;
+- cookies HTTP configuráveis por request;
+- autenticação Bearer, Basic Auth e API Key usando referências de environment;
 - collections YAML locais;
 - duplicação, renomeação, seleção e remoção de requests;
 - environments YAML com referências a secrets no Credential Manager;
 - histórico local SQLite com replay e comparação;
 - importação com prévia de collections Postman v2.1;
+- importação local de comandos cURL com revisão antes da execução;
+- painel WebSocket local com conexão persistente, mensagens de texto e eventos de sessão;
+- painel SSE local para acompanhar eventos enviados pelo servidor;
+- assertions HTTP locais para status, headers e conteúdo do body;
+- importação dinâmica de arquivos `.proto` e execução local de métodos gRPC unary;
 - integração read-only com o estado Git da collection;
 - trace HTTP inicial com DNS preflight, TTFB, download, total, IPs resolvidos e versão HTTP;
 - diagnóstico inicial para falhas de DNS, transporte e status HTTP;
+- profiler HTTP local com limite de 1000 requests, concorrência configurável, cancelamento e percentis;
+- Protocol Lab inicial com mapa de camadas baseado no trace HTTP real;
+- comparação controlada da mesma request em HTTP/1.1 e HTTP/2;
 - interface desktop em Vue 3, TypeScript, Vite e Tauri 2.
 
-TCP, TLS detalhado, reuso de conexão, WebSocket, GraphQL, gRPC, HTTP/3 e profiler de carga ainda estão no roadmap. As fases indisponíveis aparecem explicitamente na interface; não são apresentadas como medições exatas.
+OAuth, TCP, TLS detalhado, reuso de conexão, GraphQL, Reflection gRPC, streaming gRPC, HTTP/3 e profiler avançado ainda estão no roadmap. O profiler atual cobre somente execuções HTTP locais com limite e não substitui ferramentas de carga distribuída. A fase gRPC atual cobre somente `.proto` local e métodos unary; capacidades indisponíveis aparecem explicitamente na interface.
 
 ## Requisitos
 

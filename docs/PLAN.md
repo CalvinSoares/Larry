@@ -144,7 +144,7 @@ my-api/
 O primeiro formato será YAML legível pelo Git:
 
 ```yaml
-schemaVersion: 1
+schemaVersion: 2
 name: Minha API
 requests:
   - id: health
@@ -154,9 +154,10 @@ requests:
     query: []
     headers: []
     body: null
+folders: []
 ```
 
-O Rust valida a versão do schema, o nome da collection e IDs não vazios ou duplicados. O carregamento tem limite de 5 MiB. O salvamento escreve primeiro em arquivo temporário e depois substitui o destino. A primeira UI recebe o caminho digitado pelo usuário; o seletor nativo de arquivos será adicionado depois sem mudar o contrato.
+O Rust valida a versão do schema, o nome da collection, IDs de requests e IDs ou nomes de pastas. O carregamento migra `schemaVersion: 1` para a versão 2, mantendo requests antigas na raiz. O carregamento tem limite de 5 MiB. O salvamento escreve primeiro em arquivo temporário e depois substitui o destino. A UI recebe caminhos de collection e o seletor de arquivos multipart usa o plugin de diálogo do Tauri, mantendo a leitura dos arquivos no core Rust.
 
 SQLite guarda histórico, índices, metadados e snapshots opcionais. Não deve ser a fonte obrigatória das collections.
 
@@ -180,7 +181,18 @@ O Larry consulta o Git usando o executável local com argumentos allowlisted e s
 - limite de 1 MiB para saída;
 - nenhum commit, push, checkout ou troca automática de branch.
 
-O diff exibido ainda é textual. O diff semântico de método, URL, headers, body e assertions continua planejado para o próximo incremento.
+### Diff semântico da collection implementado
+
+- o GitPanel mantém o status e o diff técnico original;
+- a versão atual do YAML é comparada com a versão do mesmo arquivo em `HEAD`;
+- mudanças de collection, folders e requests são apresentadas por campo;
+- o resumo cobre nome, localização, método, URL, query params, headers, cookies, body, autenticação e assertions;
+- requests e folders adicionados ou removidos aparecem como eventos próprios;
+- valores de headers, cookies, autenticação, body e query sensível não são incluídos no diff semântico;
+- URLs têm parâmetros sensíveis mascarados antes de chegar à interface;
+- YAML inválido mantém o diff técnico disponível e marca apenas o diff semântico como indisponível.
+
+Limitações deliberadas: a comparação atual usa `HEAD` como base, ainda não compara dois commits arbitrários, não entende conflitos de merge e não executa commit, pull ou push.
 
 ### Onboarding e migração Postman
 
@@ -225,7 +237,20 @@ Referências oficiais: [exportação de dados Postman](https://learning.postman.
 - collection importada fica em memória até o usuário salvar pelo fluxo file-first existente;
 - nenhum JSON original é escrito em histórico, log ou arquivo automaticamente.
 
-Limitações deliberadas deste lote: o caminho do arquivo ainda é digitado manualmente, environments e secrets ainda não resolvem placeholders, e a autenticação importada precisa ser revisada pelo usuário.
+Limitações deliberadas deste lote: o caminho de origem do importador Postman ainda é digitado manualmente, environments e secrets ainda não resolvem placeholders, e a autenticação importada precisa ser revisada pelo usuário.
+
+### Importação local de cURL implementada
+
+- o workspace possui um modal para colar e analisar um comando cURL;
+- o parser roda no Rust e não executa shell nem chama o binário cURL;
+- método, URL, query, headers, cookies, Bearer, Basic Auth, User-Agent e Referer são convertidos quando representáveis;
+- bodies JSON/texto, `--data-urlencode`, `--form` e arquivos multipart locais são convertidos para o modelo da request;
+- `-G` move dados de formulário para a query e preserva a semântica de GET;
+- opções sem representação segura recebem warnings explícitos, incluindo redirects, `--insecure`, proxy, certificados, seleção de protocolo e arquivos de body;
+- a request importada recebe um novo ID local e abre no editor para revisão, sem execução automática ou salvamento automático;
+- testes cobrem quotes, comandos multilinha, query, JSON, Bearer, multipart, caminhos Windows, `-G` e comandos inválidos.
+
+Limitações deliberadas: aliases específicos de shell, expansão de variáveis do shell, arquivos de cookie, certificados, proxy, compressão, seleção explícita de HTTP/2 ou HTTP/3 e métodos não presentes no modelo atual não são reproduzidos. Credenciais importadas ficam no draft até revisão e devem migrar para secret references antes de salvar.
 
 ### Segundo lote de collections concluído
 
@@ -239,7 +264,7 @@ Limitações deliberadas deste lote: o caminho do arquivo ainda é digitado manu
 - layout responsivo da lista com foco visível, truncamento de URL/nome e labels acessíveis;
 - Git continua read-only e consulta o arquivo completo da collection.
 
-A coleção ainda usa um caminho digitado manualmente. O seletor nativo, diff semântico e grupos/pastas continuam separados para os próximos lotes.
+A collection agora usa o seletor nativo para escolher o arquivo. Diff semântico e merge assistance continuam separados para os próximos lotes.
 
 ### Lote visual de sidebar concluído
 
@@ -283,8 +308,9 @@ Esta reformulação é uma etapa de qualidade de produto, não uma nova capacida
 
 - a identidade deixa de ser uma barra genérica com marca central e passa a usar a assinatura `Larry / Local workbench`;
 - a topbar mostra o contexto ativo da request, environment, estado e controles reais de janela;
-- a barra lateral vira **Request rail**, com abas separadas para `Requests` e `Ferramentas locais`;
-- arquivo da collection, environment e histórico saem da navegação primária e ficam disponíveis sem reduzir a área da árvore;
+- a barra lateral vira uma **Collection tree** única, sem abas de `Requests` e `Ferramentas locais`;
+- o cabeçalho da collection concentra arquivo/Git e criação de requests por protocolo;
+- environment fica na topbar e histórico fica no Inspector, sem ocupar a árvore;
 - o centro passa a ser o **Composer**, com método, URL, envio e abas `Params`, `Headers` e `Body`;
 - a coluna de resposta passa a ser o **Inspector**, organizado como evidência da execução e não como card auxiliar;
 - uma statusbar discreta exibe informações locais sem competir com a request;
@@ -292,11 +318,13 @@ Esta reformulação é uma etapa de qualidade de produto, não uma nova capacida
 
 As próximas telas de protocolo devem reutilizar a mesma estrutura: Composer específico do protocolo à esquerda e Inspector de execução à direita. Isso permite evoluir WebSocket, gRPC e Protocol Lab sem duplicar o shell.
 
-### Ajuste do rail de ferramentas e topbar
+### Unificação da árvore e do Inspector
 
-- `Ferramentas locais` virou um launcher compacto com três entradas, em vez de renderizar três formulários longos em sequência;
-- collection, environment e history abrem o modal compartilhado com conteúdo persistente enquanto o modal está fechado;
-- o modal de histórico usa largura maior para comparação e listas locais;
+- as abas `Requests` e `Ferramentas locais` foram removidas da sidebar;
+- o cabeçalho da collection abre o modal YAML e o menu `+` cria HTTP, WebSocket, gRPC, SSE ou importa cURL;
+- environment abre pelo seletor da topbar e mantém o editor no modal compartilhado;
+- o histórico aparece como seletor compacto no cabeçalho do Inspector e repete uma execução escolhida;
+- Protocol Lab e Profiler são abas do Inspector, ao lado de Trace e Diagnostics;
 - o texto `Pronto` foi removido da topbar: a execução é comunicada diretamente pelo botão `Enviar` e pelo Inspector;
 - environment continua visível porque muda a execução da request; o estado genérico não adicionava decisão nova.
 
@@ -307,7 +335,60 @@ As próximas telas de protocolo devem reutilizar a mesma estrutura: Composer esp
 - modais têm foco inicial, foco preso, `Esc`, backdrop configurável e restauração de foco;
 - templates e regras estão em `docs/design.md` e na skill de validação visual.
 
-A timeline de rede e o seletor nativo de arquivos ainda serão implementados quando cada capacidade tiver comportamento real.
+### Selects customizados e modal de Nova Request implementados
+
+- `CustomSelect.vue` substitui os selects nativos do editor HTTP, painel gRPC e seletor de histórico;
+- o componente usa trigger e popover com tokens, chevron SVG, check SVG, foco visível, fechamento externo e navegação por teclado;
+- `NewRequestModal.vue` concentra HTTP, WebSocket, gRPC, SSE e importação de cURL no botão `+` da collection;
+- requests HTTP criadas pelo modal entram na collection local com nome, método e URL definidos pelo usuário;
+- WebSocket, gRPC e SSE reutilizam os painéis existentes até a persistência de nós de protocolo ser versionada;
+- a API do modal não introduz backend, login, telemetria ou secret em fixture;
+- a persistência de requests não HTTP continua planejada para lotes posteriores.
+
+A timeline de rede ainda será ampliada quando cada capacidade tiver comportamento real.
+
+### Pastas versionadas e menu contextual implementados
+
+- `CollectionFile` agora usa `schemaVersion: 2` e suporta `folders` recursivas com requests aninhadas;
+- collections `schemaVersion: 1` são migradas no carregamento, sem perder requests existentes;
+- a validação Rust verifica IDs e nomes de pastas, além de IDs globais de requests;
+- a sidebar renderiza requests de raiz, pastas, subpastas e contagem de requests;
+- a expansão de pastas é local à sessão e não altera o arquivo até salvar;
+- o menu contextual da collection funciona por clique no botão de ações ou clique direito no cabeçalho;
+- a criação de pasta usa o modal compartilhado e salva a estrutura no próximo salvamento YAML;
+- o menu da request permite mover a request para a raiz, uma pasta ou uma subpasta;
+- o destino é escolhido por `CustomSelect`, com caminhos hierárquicos e retorno seguro por `Cancelar`;
+- o painel de collection conta requests de raiz e aninhadas ao carregar ou salvar.
+- folders permitem criar requests diretamente dentro delas e criar subpastas pelo menu contextual;
+- o nome de uma pasta pode ser alterado pelo mesmo modal reutilizável, sem alterar suas requests;
+- a remoção de folders é confirmada em modal, remove a subárvore inteira e bloqueia a operação se ela deixaria zero requests na collection;
+- após remover a pasta ativa, a UI seleciona a primeira request executável restante.
+
+Limitações deliberadas: ainda não há drag-and-drop, a criação de requests não HTTP continua abrindo painéis temporários e a importação Postman continua achatando o caminho da pasta no nome até o adapter de importação produzir a árvore nativa. A remoção protegida garante apenas a existência de uma request, não substitui um fluxo futuro de lixeira ou restauração.
+
+### Seletor nativo e dirty state implementados
+
+- o fluxo da collection usa o `tauri-plugin-dialog` para abrir arquivos `.yaml` e escolher o destino de salvamento;
+- o caminho selecionado fica somente leitura na interface, evitando divergência entre o caminho exibido e o arquivo escolhido pelo sistema;
+- salvar sem caminho abre primeiro o diálogo de destino e só marca a collection como salva depois que o Rust confirma a gravação;
+- alterações em requests, folders e nome da collection marcam o workspace como não salvo;
+- carregamento de um arquivo existente limpa o dirty state e associa o workspace ao caminho carregado;
+- importações e collections novas permanecem explicitamente não salvas até o usuário escolher um destino;
+- a sidebar mostra um indicador discreto de alterações não salvas e o modal file-first informa o estado atual.
+
+Limitações deliberadas: trocar de arquivo não descarta alterações automaticamente, e os importadores Postman, environment e gRPC continuam com seus próprios fluxos de seleção até receberem o mesmo contrato nativo.
+
+### Auto-save local opcional implementado
+
+- a opção fica desativada por padrão e é persistida somente como preferência local do aplicativo;
+- o usuário precisa escolher um arquivo antes de o auto-save poder executar;
+- alterações são agrupadas por um debounce curto de 800 ms para evitar uma gravação por tecla;
+- o salvamento automático usa o mesmo comando Rust e a mesma escrita temporária do salvamento manual;
+- dirty state só é limpo depois da confirmação de sucesso do Rust;
+- se uma alteração acontecer durante a gravação, ela não é considerada salva e outro ciclo é agendado;
+- falhas mantêm a collection como não salva e preservam o erro técnico formatado.
+
+Limitações deliberadas: não existe auto-save de collections sem caminho, versionamento automático, backup adicional por execução ou descarte automático ao trocar de arquivo.
 
 ### Primeiro lote de environments e secrets implementado
 
@@ -336,7 +417,38 @@ variables:
     secretRef: accessToken
 ```
 
-Limitações deliberadas: ainda não há precedência entre workspace/collection/request, detecção automática de secrets, seletor nativo de arquivos, confirmação específica ao trocar para produção ou remoção de credencial pela UI. O usuário precisa apagar a credencial pelo mecanismo do sistema ou por um próximo fluxo explícito; remover a referência YAML não apaga automaticamente o secret.
+Limitações deliberadas: ainda não há precedência entre workspace/collection/request, detecção automática de secrets, confirmação específica ao trocar para produção ou remoção de credencial pela UI. O usuário precisa apagar a credencial pelo mecanismo do sistema ou por um próximo fluxo explícito; remover a referência YAML não apaga automaticamente o secret.
+
+### Primeiro lote de autenticação HTTP implementado
+
+- requests agora possuem um campo `auth` opcional e retrocompatível;
+- Bearer Token, Basic Auth e API Key podem ser configurados na aba `Auth`;
+- API keys podem ser enviadas em header ou query string;
+- placeholders de environment e secret são resolvidos no core Rust antes da execução;
+- o histórico sanitiza tokens, passwords e valores de API key;
+- collections antigas sem `auth` continuam carregando como `auth: null`;
+- OAuth, form-data e importação de autenticação do Postman continuam fora deste lote.
+
+### Segundo lote de cookies HTTP implementado
+
+- requests agora possuem uma lista `cookies` opcional e retrocompatível;
+- cookies habilitados são enviados como um header `Cookie` único;
+- nomes e valores passam por validação antes do envio;
+- placeholders de environment e secret são resolvidos no core Rust;
+- valores de cookies configurados são redigidos no histórico local;
+- collections antigas sem `cookies` continuam carregando com uma lista vazia;
+- gerenciamento automático de cookies recebidos pelo servidor ainda não faz parte deste lote.
+
+### Terceiro lote de bodies HTTP implementado
+
+- `application/x-www-form-urlencoded` usa campos chave/valor habilitados;
+- `multipart/form-data` combina campos de texto e arquivos locais;
+- o seletor nativo de arquivos usa `tauri-plugin-dialog`;
+- o Rust lê os arquivos durante a execução e limita cada arquivo a 20 MiB;
+- caminhos e valores de formulário passam pela resolução de environment e secret;
+- o histórico redige valores sensíveis e caminhos de arquivos;
+- collections antigas com JSON ou texto continuam compatíveis;
+- cookie jar automático e persistência de `Set-Cookie` permanecem fora deste lote.
 
 ### Primeiro lote de trace HTTP e diagnóstico implementado
 
@@ -366,13 +478,107 @@ Limitações deliberadas: a resolução DNS é um preflight observado e não nec
 
 Limitações deliberadas: o histórico atual mantém um resumo de comparação, não um diff visual linha a linha; requests com secrets literais são sanitizadas e podem exigir revisão antes do replay; bodies grandes não são armazenados; limpeza seletiva e exportação de incident capsule ficam para um lote posterior.
 
+### Primeiro lote de WebSocket implementado
+
+- o core Rust aceita endpoints `ws://` e `wss://`;
+- o handshake pode receber headers habilitados e valida nome, valor e quantidade antes da conexão;
+- cada conexão recebe um `session_id` local e permanece viva até fechamento do peer, fechamento explícito ou falha;
+- comandos Tauri separados abrem a sessão, enviam texto e solicitam fechamento;
+- mensagens recebidas e enviadas, abertura, fechamento e erros são emitidos como eventos `websocket_event`;
+- mensagens binárias são contabilizadas e identificadas sem transformar bytes em texto silenciosamente;
+- mensagens de texto possuem limite local de 4 MiB e o painel mantém no máximo 200 eventos visíveis;
+- o painel local permite conectar, enviar com `Ctrl + Enter`, fechar e limpar a sessão;
+- o WebSocket não entra no histórico HTTP nem é salvo automaticamente em collection neste lote.
+
+Limitações deliberadas: ainda não há headers editáveis no painel, cookies/auth integrados ao modelo, envio binário, reconexão automática, persistência de mensagens, ping configurável, métricas de handshake, Socket.IO ou proxy. A conexão vive no processo local e o fechamento do painel não encerra automaticamente a sessão mantida pelo componente.
+
+### Primeiro lote de SSE implementado
+
+- o core Rust abre streams SSE por URLs `http://` e `https://`;
+- o request envia `Accept: text/event-stream` por padrão e aceita headers habilitados;
+- cada stream recebe um `session_id` local e pode ser fechado por comando Tauri;
+- o parser interpreta `event`, múltiplas linhas `data`, `id`, `retry` e comentários de keep-alive;
+- eventos, abertura, fechamento e falhas são emitidos pelo evento Tauri `sse_event`;
+- cada evento possui tamanho, timestamp e informação técnica separada da mensagem de erro;
+- o painel local mostra conexão, content type observado, nome do evento, ID, tamanho e payload;
+- o stream não é persistido no histórico HTTP e não reconecta automaticamente neste lote.
+
+Limitações deliberadas: ainda não há headers editáveis no painel, cookies/auth integrados ao modelo, reconexão automática, uso de `Last-Event-ID`, replay, fila offline, métricas de chunks ou proxy. Um content type diferente de `text/event-stream` é observado e mostrado, mas não bloqueia a leitura, porque alguns servidores enviam parâmetros ou tipos compatíveis.
+
+### Primeiro lote de assertions HTTP implementado
+
+- requests podem declarar verificações de status HTTP, conteúdo de header e conteúdo textual do body;
+- as verificações são dados tipados, não scripts, e são avaliadas no core Rust depois da leitura completa da resposta;
+- referências de environment podem ser usadas nos valores esperados de headers e body;
+- o response inspector mostra a quantidade aprovada, o resultado de cada verificação e os valores esperado e observado;
+- requests antigas sem o campo `assertions` continuam compatíveis e carregam uma lista vazia;
+- resultados e definições passam pela sanitização do histórico antes de serem persistidos.
+
+Limitações deliberadas: ainda não há JSONPath, comparadores numéricos além de status exato, assertions compostas, scripts, snapshots ou execução de JavaScript. O match de header e body é literal, com nome de header sem diferenciação entre maiúsculas e minúsculas. Valores secretos devem continuar usando referências de environment para que a redaction seja possível.
+
+### Primeiro lote de gRPC dinâmico implementado
+
+- arquivos `.proto` locais são validados no Rust por extensão, existência, tipo e limite de 5 MiB;
+- `protox` compila o contrato em descriptors sem gerar código de serviço estático;
+- `prost-reflect` descobre services, métodos, tipos de entrada/saída e flags de streaming em runtime;
+- o painel local permite selecionar o service e método descobertos e editar um body JSON;
+- métodos unary são enviados pelo adapter Tonic com `DynamicMessage` e retornados como JSON;
+- metadados ASCII habilitados podem acompanhar a chamada;
+- erros mantêm `kind`, mensagem amigável e detalhe técnico original;
+- o fluxo não exige backend, login, sincronização ou gravação automática em collections/histórico neste lote.
+
+Limitações deliberadas: Reflection, client/server/bidirectional streaming, metadados binários, mTLS customizado, certificados próprios, importação de dependências distribuídas em vários diretórios, histórico gRPC e persistência em collections ficam para lotes posteriores. O tempo exibido é a duração observada da chamada depois que o canal é criado; ainda não é um trace separado de DNS, TCP, TLS e HTTP/2.
+
+### Primeiro lote do profiler local implementado
+
+- o profiler recebe a request atual e o environment selecionado, resolve variáveis uma vez no core e executa somente a definição resolvida;
+- cada execução é feita pelo adapter HTTP existente, preservando a validação, redaction e diagnóstico técnico do fluxo normal;
+- o usuário pode executar de 1 a 1000 requests com concorrência de 1 a 32;
+- o limite e a confirmação do destino ficam visíveis antes do início para reduzir o risco de disparar carga contra produção por engano;
+- o botão de cancelamento sinaliza todas as tarefas e interrompe futures HTTP em andamento quando o runtime consegue descartá-las;
+- o profiler emite eventos Tauri de início, progresso e resultado final;
+- o resultado separa requests concluídas, canceladas, sucesso HTTP, erro HTTP e erro de transporte;
+- o resumo calcula throughput, média, mínimo, máximo, p50, p95, p99 e distribuição de status;
+- as amostras do profiler não entram no histórico normal, pois são uma execução de diagnóstico diferente de uma request manual;
+- erros de transporte continuam carregando a mensagem amigável e o detalhe técnico disponível, sem incluir secrets resolvidos.
+
+Limitações deliberadas: este lote mede HTTP/HTTPS, não gRPC, WebSocket ou SSE; não possui warm-up, rate limiting, agendamento, distribuição entre máquinas, gravação de cada amostra ou relatório exportável. Como o adapter atual cria um `reqwest::Client` por execução, o resultado não representa reuso de conexão ou comportamento de um pool compartilhado. Cancelar impede novas etapas locais e tenta interromper a operação em andamento, mas não desfaz efeitos já aceitos pelo servidor.
+
+### Primeiro lote do Protocol Lab implementado
+
+- o launcher local abre um mapa educacional da request HTTP atual;
+- as camadas exibidas são `Application`, `Transport`, `Internet` e `Network Access`;
+- a camada Application mostra método, versão HTTP, status e TTFB quando a resposta existe;
+- a camada Transport mostra TCP, TLS, reuso e download, marcando indisponibilidade sem converter ausência em zero;
+- a camada Internet mostra DNS preflight e endereços IPv4/IPv6 resolvidos pelo cliente;
+- a camada Network Access explica por que Wi-Fi, Ethernet e bytes físicos exigem captura opt-in;
+- cada fato exibe sua proveniência como medido, observado ou indisponível;
+- o painel preserva a distinção entre evidência do adapter, interpretação didática e lacuna de observabilidade;
+- o Protocol Lab não afirma que TTFB representa somente o tempo de processamento do servidor e não simula uma rota de rede.
+
+Limitações deliberadas: este lote não compara protocolos em paralelo, não abre captura de pacotes, não mede a rota por roteadores, não inspeciona Ethernet/Wi-Fi e ainda não possui cenários HTTP/1.1, HTTP/2 ou HTTP/3 executados lado a lado. A comparação de protocolos será adicionada depois que os adapters conseguirem produzir eventos de conexão e stream com provenance própria.
+
+### Segundo lote do Protocol Lab implementado
+
+- o executor HTTP possui os modos `auto`, `http1` e `http2`;
+- a execução normal continua em modo automático para preservar a negociação padrão do request client;
+- o Protocol Lab pode executar a mesma request em HTTP/1.1 e HTTP/2 forçados, em sequência;
+- environment e secrets são resolvidos uma vez antes das duas execuções;
+- o comparador retorna status, versão observada, duração, tamanho do body e erro por modo;
+- a diferença de duração e bytes é calculada como `HTTP/2 - HTTP/1.1`;
+- o comparador não armazena body, headers ou amostras no histórico local;
+- se o endpoint não aceitar o modo escolhido, o erro técnico permanece associado somente àquele modo;
+- o resultado é uma observação de duas execuções controladas, não uma conclusão geral de que um protocolo é sempre mais rápido.
+
+Limitações deliberadas: HTTP/2 é forçado pelo adapter atual e depende de o endpoint aceitar esse protocolo; ainda não há visualização de uma conexão compartilhada, streams simultâneos, multiplexação, HPACK, priorização ou reuso de pool. HTTP/3/QUIC permanece fora deste lote.
+
 ## 6. Escopo
 
 ### MVP
 
 - HTTP/HTTPS com GET, POST, PUT, PATCH e DELETE;
-- headers, query, JSON, texto e form-data;
-- Bearer, Basic, API Key e cookies;
+- headers, query, cookies, JSON, texto e form-data;
+- Bearer, Basic e API Key;
 - environments e secret references;
 - collections file-first;
 - Git status/diff básico;
@@ -385,13 +591,19 @@ Limitações deliberadas: o histórico atual mantém um resumo de comparação, 
 - trace DNS/connect/TLS/TTFB/download quando disponível;
 - diagnóstico por camada;
 - profiler seguro para 1/10/100/1000 requests;
-- WebSocket e SSE básicos;
+- WebSocket básico;
+- SSE básico;
+- assertions HTTP declarativas para status, headers e body;
 - modo educacional;
-- gRPC unary dinâmico como vertical slice.
+- Protocol Lab inicial baseado em evidências do trace HTTP;
+- comparação controlada da mesma request em HTTP/1.1 e HTTP/2;
+- gRPC unary dinâmico por `.proto` como vertical slice.
 
 ### V2
 
-- gRPC Reflection e quatro padrões de streaming;
+- gRPC Reflection;
+- gRPC client, server e bidirectional streaming;
+- histórico e collections para requests gRPC;
 - GraphQL introspection/schema explorer;
 - HTTP/2 connection/stream lab;
 - Socket.IO;
@@ -423,10 +635,9 @@ Limitações deliberadas: o histórico atual mantém um resumo de comparação, 
 10. Trace HTTP e diagnóstico.
 11. Histórico, replay e comparação.
 12. WebSocket, SSE e assertions.
-13. gRPC dinâmico.
+13. gRPC dinâmico: importação `.proto`, descriptors e unary.
 14. Profiler local.
-15. Protocol Lab e modo educacional.
+15. Protocol Lab e modo educacional, começando pelo mapa de camadas HTTP e comparação controlada HTTP/1.1 versus HTTP/2.
 16. Hardening e distribuição.
 
 Cada fase pode ser entregue em um ou mais lotes de implementação. O formato do relatório final e os critérios de validação ficam neste plano e no checklist do projeto.
-
