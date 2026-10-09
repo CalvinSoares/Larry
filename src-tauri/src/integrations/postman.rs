@@ -113,6 +113,7 @@ pub fn preview_collection(path: &str) -> Result<PostmanImportPreview, PostmanImp
             schema_version: CURRENT_COLLECTION_SCHEMA_VERSION,
             name: source_name,
             requests: requests.clone(),
+            folders: vec![],
         },
         request_count: requests.len(),
         warnings,
@@ -295,7 +296,10 @@ fn convert_request(
         url,
         query,
         headers,
+        cookies: Vec::new(),
         body,
+        auth: None,
+        assertions: vec![],
     })
 }
 
