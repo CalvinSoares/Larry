@@ -2,7 +2,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::domain::environment::{EnvironmentFile, EnvironmentVariable};
-use crate::domain::request::{RequestBody, RequestDefinition};
+use crate::domain::request::{
+    AssertionDefinition, FormField, RequestAuth, RequestBody, RequestDefinition,
+};
 use crate::secrets::keyring_store::get_secret;
 
 #[derive(Debug, Serialize)]
@@ -55,10 +57,54 @@ pub fn resolve_request(
         header.value = resolve_string(&header.value, environment, &mut redactions)?;
     }
 
+    for cookie in &mut request.cookies {
+        cookie.name = resolve_string(&cookie.name, environment, &mut redactions)?;
+        cookie.value = resolve_string(&cookie.value, environment, &mut redactions)?;
+    }
+
     if let Some(body) = &mut request.body {
         match body {
             RequestBody::Json(value) => resolve_json(value, environment, &mut redactions)?,
             RequestBody::Text(value) => {
+                *value = resolve_string(value, environment, &mut redactions)?;
+            }
+            RequestBody::FormUrlEncoded(fields) => {
+                resolve_form_fields(fields, environment, &mut redactions)?;
+            }
+            RequestBody::Multipart(multipart) => {
+                resolve_form_fields(&mut multipart.fields, environment, &mut redactions)?;
+                for file in &mut multipart.files {
+                    file.name = resolve_string(&file.name, environment, &mut redactions)?;
+                    file.path = resolve_string(&file.path, environment, &mut redactions)?;
+                }
+            }
+        }
+    }
+
+    if let Some(auth) = &mut request.auth {
+        match auth {
+            RequestAuth::Bearer { token } => {
+                *token = resolve_string(token, environment, &mut redactions)?;
+            }
+            RequestAuth::Basic { username, password } => {
+                *username = resolve_string(username, environment, &mut redactions)?;
+                *password = resolve_string(password, environment, &mut redactions)?;
+            }
+            RequestAuth::ApiKey { name, value, .. } => {
+                *name = resolve_string(name, environment, &mut redactions)?;
+                *value = resolve_string(value, environment, &mut redactions)?;
+            }
+        }
+    }
+
+    for assertion in &mut request.assertions {
+        match assertion {
+            AssertionDefinition::StatusEquals { .. } => {}
+            AssertionDefinition::HeaderContains { name, value } => {
+                *name = resolve_string(name, environment, &mut redactions)?;
+                *value = resolve_string(value, environment, &mut redactions)?;
+            }
+            AssertionDefinition::BodyContains { value } => {
                 *value = resolve_string(value, environment, &mut redactions)?;
             }
         }
@@ -90,6 +136,19 @@ fn resolve_json(
             }
         }
         _ => {}
+    }
+
+    Ok(())
+}
+
+fn resolve_form_fields(
+    fields: &mut [FormField],
+    environment: &EnvironmentFile,
+    redactions: &mut Vec<String>,
+) -> Result<(), VariableResolutionError> {
+    for field in fields {
+        field.name = resolve_string(&field.name, environment, redactions)?;
+        field.value = resolve_string(&field.value, environment, redactions)?;
     }
 
     Ok(())
@@ -226,7 +285,10 @@ mod tests {
                 enabled: true,
             }],
             headers: vec![],
+            cookies: vec![],
             body: None,
+            auth: None,
+            assertions: vec![],
         };
 
         let resolved = resolve_request(request, Some(&environment())).unwrap();
@@ -245,11 +307,74 @@ mod tests {
             url: "{{missing}}/health".to_string(),
             query: vec![],
             headers: vec![],
+            cookies: vec![],
             body: None,
+            auth: None,
+            assertions: vec![],
         };
 
         let error = resolve_request(request, Some(&environment())).unwrap_err();
 
         assert_eq!(error.kind, "missing_variable");
+    }
+
+    #[test]
+    fn resolve_variavel_em_bearer_auth() {
+        let mut test_environment = environment();
+        test_environment.variables.push(EnvironmentVariable {
+            name: "token".to_string(),
+            value: Some("local-token".to_string()),
+            secret_ref: None,
+        });
+
+        let request = RequestDefinition {
+            id: "health".to_string(),
+            name: "Health".to_string(),
+            method: HttpMethod::Get,
+            url: "http://localhost:3000/health".to_string(),
+            query: vec![],
+            headers: vec![],
+            cookies: vec![],
+            body: None,
+            auth: Some(RequestAuth::Bearer {
+                token: "{{token}}".to_string(),
+            }),
+            assertions: vec![],
+        };
+
+        let resolved = resolve_request(request, Some(&test_environment)).unwrap();
+
+        match resolved.request.auth {
+            Some(RequestAuth::Bearer { token }) => assert_eq!(token, "local-token"),
+            _ => panic!("auth não foi preservada como bearer"),
+        }
+        assert!(resolved.redactions.is_empty());
+    }
+
+    #[test]
+    fn resolve_variavel_em_assertion() {
+        let request = RequestDefinition {
+            id: "health".to_string(),
+            name: "Health".to_string(),
+            method: HttpMethod::Get,
+            url: "http://localhost:3000/health".to_string(),
+            query: vec![],
+            headers: vec![],
+            cookies: vec![],
+            body: None,
+            auth: None,
+            assertions: vec![AssertionDefinition::BodyContains {
+                value: "{{baseUrl}}".to_string(),
+            }],
+        };
+
+        let resolved = resolve_request(request, Some(&environment())).unwrap();
+
+        assert_eq!(
+            resolved.request.assertions[0],
+            AssertionDefinition::BodyContains {
+                value: "http://localhost:3000".to_string(),
+            }
+        );
     }
 }
