@@ -6,6 +6,9 @@ import type {
   CurlImportPreview,
   EnvironmentFile,
   GrpcSchema,
+  GrpcReflectionRequest,
+  GrpcStreamingRequest,
+  GrpcStreamingResponse,
   GrpcUnaryRequest,
   GrpcUnaryResponse,
   GitSnapshot,
@@ -35,8 +38,13 @@ export function getSampleRequest() {
 export function executeRequest(
   request: RequestDefinition,
   environment: EnvironmentFile | null = null,
+  runId: string,
 ) {
-  return invoke<HttpResponse>("execute_request", { request, environment });
+  return invoke<HttpResponse>("execute_request", { request, environment, runId });
+}
+
+export function cancelRequest(runId: string) {
+  return invoke<void>("cancel_request", { runId });
 }
 
 export function compareHttpProtocols(
@@ -113,8 +121,20 @@ export function inspectGrpcProto(path: string) {
   return invoke<GrpcSchema>("inspect_grpc_proto", { path });
 }
 
+export function inspectGrpcReflection(request: GrpcReflectionRequest) {
+  return invoke<GrpcSchema>("inspect_grpc_reflection", { request });
+}
+
 export function executeGrpcUnary(request: GrpcUnaryRequest) {
   return invoke<GrpcUnaryResponse>("execute_grpc_unary", { request });
+}
+
+export function executeGrpcStream(request: GrpcStreamingRequest, runId: string) {
+  return invoke<GrpcStreamingResponse>("execute_grpc_stream", { request, runId });
+}
+
+export function cancelGrpcStream(runId: string) {
+  return invoke<void>("cancel_grpc_stream", { runId });
 }
 
 export function openWebSocket(request: WebSocketOpenRequest) {

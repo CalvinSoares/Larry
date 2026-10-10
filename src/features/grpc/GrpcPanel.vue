@@ -3,13 +3,21 @@ import { computed, ref, watch } from "vue";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import { formatIpcError } from "../../services/errors";
-import { executeGrpcUnary, inspectGrpcProto } from "../../services/ipc";
+import {
+  cancelGrpcStream,
+  executeGrpcStream,
+  executeGrpcUnary,
+  inspectGrpcProto,
+  inspectGrpcReflection,
+} from "../../services/ipc";
 import CustomSelect from "../../components/ui/CustomSelect.vue";
 import type {
   GrpcMetadataEntry,
   GrpcMethod,
+  GrpcReflectionRequest,
   GrpcSchema,
   GrpcService,
+  GrpcStreamingResponse,
   GrpcUnaryResponse,
 } from "../../types/api";
 import type { CustomSelectOption } from "../../types/ui";
@@ -20,15 +28,21 @@ const props = defineProps<{
 
 const protoPath = ref("");
 const url = ref("http://localhost:50051");
+const reflectionUrl = ref("http://localhost:50051");
+const reflectionHost = ref("");
+const reflectionRequest = ref<GrpcReflectionRequest | null>(null);
 const schema = ref<GrpcSchema | null>(null);
 const selectedServiceName = ref("");
 const selectedMethodName = ref("");
 const bodyText = ref("{}\n");
 const metadata = ref<GrpcMetadataEntry[]>([]);
-const response = ref<GrpcUnaryResponse | null>(null);
+const response = ref<GrpcUnaryResponse | GrpcStreamingResponse | null>(null);
+const runId = ref<string | null>(null);
 const error = ref("");
 const isInspecting = ref(false);
+const isReflecting = ref(false);
 const isExecuting = ref(false);
+const isCancelling = ref(false);
 
 const selectedService = computed<GrpcService | null>(() => {
   return schema.value?.services.find((service) => service.fullName === selectedServiceName.value) ?? null;
@@ -55,12 +69,37 @@ const methodOptions = computed<CustomSelectOption[]>(() => [
   })),
 ]);
 
+const methodIsStreaming = computed(() => {
+  return Boolean(selectedMethod.value?.clientStreaming || selectedMethod.value?.serverStreaming);
+});
+
+const streamingModeLabel = computed(() => {
+  if (!selectedMethod.value) {
+    return "";
+  }
+  if (selectedMethod.value.clientStreaming && selectedMethod.value.serverStreaming) {
+    return "Bidirectional streaming · envie uma lista JSON";
+  }
+  if (selectedMethod.value.clientStreaming) {
+    return "Client streaming · envie uma lista JSON";
+  }
+  return "Server streaming · uma mensagem JSON, várias respostas";
+});
+
 const responseBody = computed(() => {
   if (!response.value) {
     return "";
   }
 
-  return JSON.stringify(response.value.body, null, 2);
+  return JSON.stringify("messages" in response.value ? response.value.messages : response.value.body, null, 2);
+});
+
+const responseMessageCount = computed(() => {
+  if (!response.value) {
+    return 0;
+  }
+
+  return "messages" in response.value ? response.value.messageCount : 1;
 });
 
 function resetError() {
@@ -90,6 +129,7 @@ async function importProto() {
   try {
     const inspected = await inspectGrpcProto(selected);
     protoPath.value = inspected.sourcePath;
+    reflectionRequest.value = null;
     schema.value = inspected;
     selectedServiceName.value = inspected.services[0]?.fullName ?? "";
     chooseFirstMethod(inspected.services[0] ?? null);
@@ -101,6 +141,43 @@ async function importProto() {
     error.value = formatIpcError(value);
   } finally {
     isInspecting.value = false;
+  }
+}
+
+async function inspectReflection() {
+  resetError();
+  const normalizedUrl = reflectionUrl.value.trim();
+
+  if (!normalizedUrl) {
+    error.value = "Informe o endpoint gRPC que publica Reflection.";
+    return;
+  }
+
+  isReflecting.value = true;
+
+  try {
+    const request: GrpcReflectionRequest = {
+      url: normalizedUrl,
+      host: reflectionHost.value.trim(),
+      metadata: metadata.value,
+    };
+    const inspected = await inspectGrpcReflection(request);
+    reflectionRequest.value = request;
+    protoPath.value = "";
+    reflectionUrl.value = normalizedUrl;
+    url.value = normalizedUrl;
+    schema.value = inspected;
+    selectedServiceName.value = inspected.services[0]?.fullName ?? "";
+    chooseFirstMethod(inspected.services[0] ?? null);
+    response.value = null;
+  } catch (value) {
+    reflectionRequest.value = null;
+    schema.value = null;
+    selectedServiceName.value = "";
+    selectedMethodName.value = "";
+    error.value = formatIpcError(value);
+  } finally {
+    isReflecting.value = false;
   }
 }
 
@@ -130,13 +207,13 @@ async function execute() {
   resetError();
   response.value = null;
 
-  if (!schema.value || !selectedService.value || !selectedMethod.value) {
-    error.value = "Importe um .proto e selecione um serviço e método.";
-    return;
-  }
-
-  if (selectedMethod.value.clientStreaming || selectedMethod.value.serverStreaming) {
-    error.value = "Este lote suporta somente métodos unary. Streaming será adicionado em uma fase posterior.";
+  if (
+    !schema.value ||
+    !selectedService.value ||
+    !selectedMethod.value ||
+    (!protoPath.value.trim() && !reflectionRequest.value)
+  ) {
+    error.value = "Importe um .proto ou descubra o contrato por Reflection, depois selecione um serviço e método.";
     return;
   }
 
@@ -154,20 +231,74 @@ async function execute() {
   }
 
   isExecuting.value = true;
+  const streamRunId = methodIsStreaming.value
+    ? `grpc-stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    : null;
+  runId.value = streamRunId;
 
   try {
-    response.value = await executeGrpcUnary({
+    const source = {
       protoPath: protoPath.value,
       url: url.value.trim(),
       service: selectedService.value.fullName,
       method: selectedMethod.value.name,
-      body,
       metadata: metadata.value,
-    });
+      reflection: reflectionRequest.value
+        ? {
+            url: url.value.trim(),
+            host: reflectionHost.value.trim(),
+            metadata: metadata.value,
+          }
+        : null,
+    };
+
+    if (methodIsStreaming.value) {
+      const messages = selectedMethod.value.clientStreaming
+        ? Array.isArray(body)
+          ? body
+          : null
+        : [body];
+
+      if (!messages) {
+        error.value = "Métodos client ou bidirectional streaming exigem um array JSON de mensagens.";
+        return;
+      }
+
+      response.value = await executeGrpcStream(
+        {
+          ...source,
+          messages,
+        },
+        streamRunId!,
+      );
+    } else {
+      response.value = await executeGrpcUnary({
+        ...source,
+        body,
+      });
+    }
   } catch (value) {
     error.value = formatIpcError(value);
   } finally {
     isExecuting.value = false;
+    runId.value = null;
+    isCancelling.value = false;
+  }
+}
+
+async function cancel() {
+  if (!runId.value) {
+    return;
+  }
+
+  resetError();
+  isCancelling.value = true;
+
+  try {
+    await cancelGrpcStream(runId.value);
+  } catch (value) {
+    isCancelling.value = false;
+    error.value = formatIpcError(value);
   }
 }
 
@@ -183,6 +314,29 @@ watch(
 
 <template>
   <div class="grpc-panel">
+    <section class="grpc-section">
+      <div class="section-heading">
+        <div>
+          <span class="section-label">DESCRIPTOR REMOTO</span>
+          <h3>Descobrir por Reflection</h3>
+        </div>
+        <button class="action-button" type="button" :disabled="isReflecting" @click="inspectReflection">
+          {{ isReflecting ? "Consultando..." : "Consultar endpoint" }}
+        </button>
+      </div>
+      <div class="field-grid reflection-grid">
+        <label>
+          Endpoint Reflection
+          <input v-model="reflectionUrl" type="text" spellcheck="false" placeholder="http://localhost:50051" />
+        </label>
+        <label>
+          Host opcional
+          <input v-model="reflectionHost" type="text" spellcheck="false" placeholder="service.local" />
+        </label>
+      </div>
+      <p class="path-value">O servidor precisa publicar o serviço padrão de gRPC Reflection. O contrato permanece em memória local.</p>
+    </section>
+
     <section class="grpc-section">
       <div class="section-heading">
         <div>
@@ -202,12 +356,23 @@ watch(
     <section class="grpc-section">
       <div class="section-heading">
         <div>
-          <span class="section-label">EXECUÇÃO UNARY</span>
+          <span class="section-label">EXECUÇÃO</span>
           <h3>Endpoint e método</h3>
         </div>
-        <button class="action-button primary" type="button" :disabled="isExecuting" @click="execute">
-          {{ isExecuting ? "Executando..." : "Executar" }}
-        </button>
+        <div class="execution-actions">
+          <button class="action-button primary" type="button" :disabled="isExecuting" @click="execute">
+            {{ isExecuting ? "Executando..." : methodIsStreaming ? "Abrir streaming" : "Executar" }}
+          </button>
+          <button
+            v-if="isExecuting && methodIsStreaming"
+            class="text-button"
+            type="button"
+            :disabled="isCancelling"
+            @click="cancel"
+          >
+            {{ isCancelling ? "Cancelando..." : "Cancelar" }}
+          </button>
+        </div>
       </div>
 
       <div class="field-grid endpoint-grid">
@@ -238,7 +403,7 @@ watch(
 
       <div class="method-note" v-if="selectedMethod">
         <span>{{ selectedMethod.inputType }} → {{ selectedMethod.outputType }}</span>
-        <span v-if="selectedMethod.clientStreaming || selectedMethod.serverStreaming" class="warning-text">Streaming não disponível</span>
+        <span v-if="methodIsStreaming" class="warning-text">{{ streamingModeLabel }}</span>
       </div>
     </section>
 
@@ -246,11 +411,18 @@ watch(
       <div class="section-heading compact">
         <div>
           <span class="section-label">PAYLOAD</span>
-          <h3>Body JSON</h3>
+          <h3>{{ methodIsStreaming && selectedMethod?.clientStreaming ? "Mensagens JSON" : "Body JSON" }}</h3>
         </div>
         <button class="text-button" type="button" @click="prettifyBody">Formatar JSON</button>
       </div>
-      <textarea v-model="bodyText" class="code-input" spellcheck="false" rows="8" aria-label="Body JSON" />
+      <textarea
+        v-model="bodyText"
+        class="code-input"
+        spellcheck="false"
+        rows="8"
+        :aria-label="methodIsStreaming && selectedMethod?.clientStreaming ? 'Mensagens JSON' : 'Body JSON'"
+        :placeholder="methodIsStreaming && selectedMethod?.clientStreaming ? '[{}]' : '{}'"
+      />
     </section>
 
     <section class="grpc-section">
@@ -279,7 +451,7 @@ watch(
           <span class="section-label">RESULTADO</span>
           <h3>{{ response ? `gRPC ${response.status}` : "Resposta" }}</h3>
         </div>
-        <span v-if="response" class="response-duration">{{ response.durationMs }} ms</span>
+        <span v-if="response" class="response-duration">{{ response.durationMs }} ms · {{ responseMessageCount }} mensagem(ns)</span>
       </div>
       <pre v-if="response" class="response-code">{{ responseBody }}</pre>
       <p v-else class="empty-state">A resposta da chamada aparecerá aqui.</p>
@@ -310,6 +482,12 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.execution-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .section-heading.compact {
@@ -351,6 +529,15 @@ watch(
 .icon-button:hover:not(:disabled) {
   border-color: var(--color-brand);
   color: var(--color-brand);
+}
+
+.action-button:focus-visible,
+.text-button:focus-visible,
+.icon-button:focus-visible,
+input:focus-visible,
+.code-input:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 1px;
 }
 
 .action-button.primary {
@@ -405,6 +592,10 @@ input:disabled {
   grid-template-columns: minmax(220px, 1.6fr) minmax(160px, 1fr) minmax(150px, 1fr);
 }
 
+.reflection-grid {
+  grid-template-columns: minmax(260px, 1.6fr) minmax(160px, 1fr);
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -435,6 +626,7 @@ input,
 .warning-text {
   color: var(--color-warning);
   font-family: inherit;
+  text-align: right;
 }
 
 .body-section {
@@ -507,7 +699,8 @@ input,
 }
 
 @media (max-width: 720px) {
-  .endpoint-grid {
+  .endpoint-grid,
+  .reflection-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -211,6 +211,12 @@ export interface GrpcSchema {
   services: GrpcService[];
 }
 
+export interface GrpcReflectionRequest {
+  url: string;
+  host: string;
+  metadata: GrpcMetadataEntry[];
+}
+
 export interface GrpcUnaryRequest {
   protoPath: string;
   url: string;
@@ -218,11 +224,31 @@ export interface GrpcUnaryRequest {
   method: string;
   body: unknown;
   metadata: GrpcMetadataEntry[];
+  reflection?: GrpcReflectionRequest | null;
 }
 
 export interface GrpcUnaryResponse {
   status: string;
   body: unknown;
+  durationMs: number;
+  responseMetadata: GrpcMetadataEntry[];
+  trailers: GrpcMetadataEntry[];
+}
+
+export interface GrpcStreamingRequest {
+  protoPath: string;
+  url: string;
+  service: string;
+  method: string;
+  messages: unknown[];
+  metadata: GrpcMetadataEntry[];
+  reflection?: GrpcReflectionRequest | null;
+}
+
+export interface GrpcStreamingResponse {
+  status: string;
+  messages: unknown[];
+  messageCount: number;
   durationMs: number;
   responseMetadata: GrpcMetadataEntry[];
   trailers: GrpcMetadataEntry[];
