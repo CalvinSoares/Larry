@@ -464,6 +464,29 @@ Limitações deliberadas: ainda não há precedência entre workspace/collection
 
 Limitações deliberadas: a resolução DNS é um preflight observado e não necessariamente o mesmo lookup interno do reqwest; TTFB mede o intervalo até os headers ficarem disponíveis e não prova o tempo gasto exclusivamente no servidor; TCP, TLS/certificado/ALPN, connection reuse e redirects exigirão um adapter instrumentado e eventos próprios.
 
+### Cancelamento de request HTTP implementado
+
+- cada execução HTTP manual recebe um `run_id` local e temporário;
+- o frontend pode sinalizar o cancelamento pelo Tauri IPC enquanto a request está em execução;
+- o core mantém um controlador por execução e cancela o future HTTP sem usar shell ou privilégio elevado;
+- o botão de envio muda para `Cancelar` durante a execução e para `Cancelando...` enquanto o sinal é processado;
+- o erro de cancelamento mantém `kind`, mensagem amigável e diagnóstico técnico;
+- requests canceladas continuam passando pela sanitização antes de entrar no histórico;
+- IDs duplicados são rejeitados para evitar cancelar uma execução diferente;
+- testes cobrem IDs duplicados e o caminho de cancelamento antes do início do transporte.
+
+Limitações deliberadas: o cancelamento interrompe a operação local, mas não desfaz efeitos que já tenham sido aceitos pelo servidor; cancelamento de WebSocket, SSE e streams gRPC continua pertencendo aos respectivos managers; o timeout HTTP ainda usa o limite local fixo de 30 segundos.
+
+### Fixtures locais e falhas HTTP cobertas
+
+- o executor possui fixtures TCP locais para respostas 401, 403 e 500;
+- testes cobrem conexão recusada, timeout e falha de resolução DNS;
+- o timeout de produção continua em 30 segundos, mas o executor interno aceita um limite controlado para testes determinísticos;
+- nenhum teste depende de uma API externa ou envia dados para a internet;
+- diagnósticos de aplicação, transporte e DNS continuam separados por camada e com provenance observada.
+
+Limitações deliberadas: ainda não existe uma suíte end-to-end do executável empacotado; os fixtures validam o core Rust e o contrato de erro, enquanto o smoke test completo do Tauri permanece como etapa de distribuição.
+
 ### Primeiro lote de histórico, replay e comparação implementado
 
 - o core cria `history.sqlite3` no diretório local da aplicação;
@@ -529,6 +552,34 @@ Limitações deliberadas: ainda não há JSONPath, comparadores numéricos além
 
 Limitações deliberadas: Reflection, client/server/bidirectional streaming, metadados binários, mTLS customizado, certificados próprios, importação de dependências distribuídas em vários diretórios, histórico gRPC e persistência em collections ficam para lotes posteriores. O tempo exibido é a duração observada da chamada depois que o canal é criado; ainda não é um trace separado de DNS, TCP, TLS e HTTP/2.
 
+### Primeiro lote de gRPC Reflection implementado
+
+- o cliente pode consultar o serviço padrão de gRPC Reflection sem importar um `.proto` local;
+- o core lista services, solicita descriptors por símbolo e monta um `DescriptorPool` em memória;
+- dependências repetidas são deduplicadas por nome de arquivo antes da interpretação;
+- a descoberta possui limite de 512 services, limite agregado de 16 MiB de descriptors e timeout local de 15 segundos;
+- metadata ASCII habilitada pode acompanhar a consulta de Reflection, mantendo a validação existente;
+- o painel gRPC permite informar endpoint, host opcional, consultar o contrato e selecionar service e método descobertos;
+- métodos unary podem executar usando Reflection sem gravar o contrato recebido no filesystem, collection ou histórico;
+- errors de conexão, timeout, resposta do servidor e descriptor inválido preservam `kind`, mensagem amigável e detalhe técnico.
+
+Limitações deliberadas: o lote ainda não aceita metadata binário, não persiste descriptors gRPC e não implementa cache entre sessões. A chamada reconsulta Reflection no momento da execução para manter o contrato em memória e evitar estado oculto.
+
+### Primeiro lote de streaming gRPC implementado
+
+- server streaming aceita uma mensagem JSON e exibe várias respostas;
+- client streaming aceita uma lista JSON e exibe a resposta final;
+- bidirectional streaming aceita uma lista JSON e exibe as respostas recebidas;
+- o método é classificado pelas flags do descriptor, sem configuração manual duplicada;
+- o transporte usa o codec dinâmico baseado no mesmo `DescriptorPool` do unary e da Reflection;
+- cada stream limita entrada e saída a 512 mensagens;
+- cada espera por mensagem possui timeout local de inatividade de 30 segundos;
+- o usuário pode cancelar o stream em execução pelo comando Tauri dedicado;
+- resposta, metadados iniciais, trailers, quantidade de mensagens e duração observada são retornados ao painel;
+- o fluxo continua local-first e não grava payloads no histórico neste lote.
+
+Limitações deliberadas: a interface envia uma sequência finita de mensagens e aguarda o fluxo, não oferece edição interativa enquanto o stream está aberto, não persiste requests de streaming, não aceita metadata binário e ainda não exibe cada mensagem por evento incremental. O cancelamento interrompe a operação local quando o future do transporte pode ser descartado, mas não desfaz mensagens já aceitas pelo servidor.
+
 ### Primeiro lote do profiler local implementado
 
 - o profiler recebe a request atual e o environment selecionado, resolve variáveis uma vez no core e executa somente a definição resolvida;
@@ -572,6 +623,28 @@ Limitações deliberadas: este lote não compara protocolos em paralelo, não ab
 
 Limitações deliberadas: HTTP/2 é forçado pelo adapter atual e depende de o endpoint aceitar esse protocolo; ainda não há visualização de uma conexão compartilhada, streams simultâneos, multiplexação, HPACK, priorização ou reuso de pool. HTTP/3/QUIC permanece fora deste lote.
 
+### Hardening de persistência e limites locais
+
+- collections e environments rejeitam arquivos ausentes, YAML inválido e arquivos acima do limite local antes de validar o domínio;
+- collections possuem limite de 5 MiB e environments possuem limite de 1 MiB;
+- o reader de responses interrompe a leitura quando o body excede 10 MiB, preservando o erro `response_too_large`;
+- fixtures locais cobrem os caminhos de parse, metadata e tamanho sem depender de rede externa ou de arquivos do usuário;
+- a ausência de um secret é classificada separadamente de uma falha do credential store;
+- mensagens de erro de secret não incluem o valor secreto e os testes não gravam credenciais reais no sistema operacional;
+- o contrato continua local-first: os limites protegem memória e estabilidade do processo, sem upload ou telemetria.
+
+Limitações deliberadas: a detecção de secret ausente depende do backend de credenciais escolhido pelo sistema; o teste unitário cobre a classificação do erro, enquanto uma verificação real do Credential Manager/Keychain deve ocorrer em smoke tests específicos de cada plataforma.
+
+### Smoke test de distribuição Windows concluído
+
+- `npm run tauri build` executou o build Vue/TypeScript, a compilação release do Rust e o empacotamento Tauri;
+- o executável release foi gerado para Windows x64 em `src-tauri/target/release/larry-api-client.exe`;
+- os bundles MSI e NSIS foram gerados localmente;
+- a configuração de janela, capabilities mínimas, assets de ícone e frontend compilado foram aceitos pelo pipeline de distribuição;
+- nenhum backend, serviço remoto, login ou telemetria foi introduzido para gerar os instaladores.
+
+Limitações deliberadas: este smoke test foi executado apenas no Windows x64 da máquina de desenvolvimento; ainda não existe CI para instaladores, assinatura de código, atualização automática ou validação em uma máquina limpa sem toolchain local.
+
 ## 6. Escopo
 
 ### MVP
@@ -601,8 +674,8 @@ Limitações deliberadas: HTTP/2 é forçado pelo adapter atual e depende de o e
 
 ### V2
 
-- gRPC Reflection;
-- gRPC client, server e bidirectional streaming;
+- persistência de requests e descriptors gRPC;
+- cache local controlado de descriptors gRPC;
 - histórico e collections para requests gRPC;
 - GraphQL introspection/schema explorer;
 - HTTP/2 connection/stream lab;
