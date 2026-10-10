@@ -1,10 +1,16 @@
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use futures_util::stream;
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
+use prost_types::FileDescriptorSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::watch;
+use tokio::time::timeout;
 use tonic::client::Grpc;
 use tonic::codec::{BufferSettings, Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
 use tonic::codegen::http::uri::PathAndQuery;
@@ -12,9 +18,18 @@ use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, KeyAndValueRef, Meta
 use tonic::transport::Endpoint;
 use tonic::Request;
 use tonic::Status;
+use tonic_reflection::pb::v1::server_reflection_client::ServerReflectionClient;
+use tonic_reflection::pb::v1::server_reflection_request::MessageRequest;
+use tonic_reflection::pb::v1::server_reflection_response::MessageResponse;
+use tonic_reflection::pb::v1::ServerReflectionRequest;
 
 const MAX_PROTO_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_METADATA: usize = 128;
+const MAX_REFLECTION_SERVICES: usize = 512;
+const MAX_REFLECTION_DESCRIPTOR_BYTES: usize = 16 * 1024 * 1024;
+const MAX_STREAM_MESSAGES: usize = 512;
+const REFLECTION_TIMEOUT: Duration = Duration::from_secs(15);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 struct DynamicGrpcCodec {
@@ -82,6 +97,16 @@ pub struct GrpcSchema {
     pub services: Vec<GrpcService>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrpcReflectionRequest {
+    pub url: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub metadata: Vec<GrpcMetadataEntry>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrpcService {
@@ -119,6 +144,8 @@ pub struct GrpcUnaryRequest {
     pub body: Value,
     #[serde(default)]
     pub metadata: Vec<GrpcMetadataEntry>,
+    #[serde(default)]
+    pub reflection: Option<GrpcReflectionRequest>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,6 +153,31 @@ pub struct GrpcUnaryRequest {
 pub struct GrpcUnaryResponse {
     pub status: String,
     pub body: Value,
+    pub duration_ms: u64,
+    pub response_metadata: Vec<GrpcMetadataEntry>,
+    pub trailers: Vec<GrpcMetadataEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrpcStreamingRequest {
+    pub proto_path: String,
+    pub url: String,
+    pub service: String,
+    pub method: String,
+    pub messages: Vec<Value>,
+    #[serde(default)]
+    pub metadata: Vec<GrpcMetadataEntry>,
+    #[serde(default)]
+    pub reflection: Option<GrpcReflectionRequest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrpcStreamingResponse {
+    pub status: String,
+    pub messages: Vec<Value>,
+    pub message_count: usize,
     pub duration_ms: u64,
     pub response_metadata: Vec<GrpcMetadataEntry>,
     pub trailers: Vec<GrpcMetadataEntry>,
@@ -149,6 +201,71 @@ impl GrpcError {
             kind: kind.into(),
             message: message.into(),
             technical: technical.into(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct GrpcStreamManager {
+    runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+}
+
+impl GrpcStreamManager {
+    pub fn begin(&self, run_id: String) -> Result<watch::Receiver<bool>, GrpcError> {
+        let (sender, receiver) = watch::channel(false);
+        let mut runs = self.runs.lock().map_err(|_| {
+            GrpcError::new(
+                "stream_manager",
+                "Não foi possível acessar o controle do streaming gRPC.",
+                "O mutex de execuções gRPC está indisponível.",
+            )
+        })?;
+
+        if runs.contains_key(&run_id) {
+            return Err(GrpcError::new(
+                "stream_already_running",
+                "Já existe um streaming gRPC com este identificador em execução.",
+                format!("Run ID recebido: {run_id}"),
+            ));
+        }
+
+        runs.insert(run_id, sender);
+        Ok(receiver)
+    }
+
+    pub fn cancel(&self, run_id: &str) -> Result<(), GrpcError> {
+        let sender = self
+            .runs
+            .lock()
+            .map_err(|_| {
+                GrpcError::new(
+                    "stream_manager",
+                    "Não foi possível acessar o controle do streaming gRPC.",
+                    "O mutex de execuções gRPC está indisponível.",
+                )
+            })?
+            .get(run_id)
+            .cloned()
+            .ok_or_else(|| {
+                GrpcError::new(
+                    "stream_not_found",
+                    "O streaming gRPC não está mais em execução.",
+                    format!("Run ID recebido: {run_id}"),
+                )
+            })?;
+
+        sender.send(true).map_err(|_| {
+            GrpcError::new(
+                "stream_cancel",
+                "Não foi possível sinalizar o cancelamento do streaming gRPC.",
+                "O consumidor do sinal de cancelamento foi encerrado.",
+            )
+        })
+    }
+
+    pub fn remove(&self, run_id: &str) {
+        if let Ok(mut runs) = self.runs.lock() {
+            runs.remove(run_id);
         }
     }
 }
@@ -228,6 +345,33 @@ fn load_pool(path: &str) -> Result<(PathBuf, DescriptorPool), GrpcError> {
 
 pub fn inspect_proto(path: &str) -> Result<GrpcSchema, GrpcError> {
     let (canonical, pool) = load_pool(path)?;
+    Ok(schema_from_pool(canonical.display().to_string(), pool))
+}
+
+pub async fn inspect_reflection(request: GrpcReflectionRequest) -> Result<GrpcSchema, GrpcError> {
+    let pool = load_reflection_pool(&request).await?;
+    Ok(schema_from_pool("gRPC Reflection".to_string(), pool))
+}
+
+async fn load_pool_for_source(
+    proto_path: &str,
+    reflection: Option<&GrpcReflectionRequest>,
+) -> Result<DescriptorPool, GrpcError> {
+    if proto_path.trim().is_empty() {
+        let reflection = reflection.ok_or_else(|| {
+            GrpcError::new(
+                "grpc_source",
+                "Selecione um .proto local ou configure gRPC Reflection.",
+                "Nenhuma fonte de descriptors foi enviada.",
+            )
+        })?;
+        load_reflection_pool(reflection).await
+    } else {
+        load_pool(proto_path).map(|(_, pool)| pool)
+    }
+}
+
+fn schema_from_pool(source_path: String, pool: DescriptorPool) -> GrpcSchema {
     let mut services = pool
         .services()
         .map(|service| {
@@ -253,10 +397,363 @@ pub fn inspect_proto(path: &str) -> Result<GrpcSchema, GrpcError> {
         .collect::<Vec<_>>();
     services.sort_by(|left, right| left.full_name.cmp(&right.full_name));
 
-    Ok(GrpcSchema {
-        source_path: canonical.display().to_string(),
+    GrpcSchema {
+        source_path,
         services,
+    }
+}
+
+fn endpoint_from_url(raw_url: &str) -> Result<Endpoint, GrpcError> {
+    let endpoint_url = raw_url.trim();
+    if !(endpoint_url.starts_with("http://") || endpoint_url.starts_with("https://")) {
+        return Err(GrpcError::new(
+            "grpc_url",
+            "Informe uma URL gRPC http:// ou https:// válida.",
+            format!("Esquema não suportado: {endpoint_url}"),
+        ));
+    }
+
+    Endpoint::from_shared(endpoint_url.to_string())
+        .map(|endpoint| {
+            endpoint
+                .connect_timeout(REFLECTION_TIMEOUT)
+                .timeout(REFLECTION_TIMEOUT)
+        })
+        .map_err(|error| {
+            GrpcError::new(
+                "grpc_url",
+                "Informe uma URL gRPC http:// ou https:// válida.",
+                error.to_string(),
+            )
+        })
+}
+
+async fn reflection_exchange(
+    request: &GrpcReflectionRequest,
+    message_request: MessageRequest,
+) -> Result<Vec<tonic_reflection::pb::v1::ServerReflectionResponse>, GrpcError> {
+    let endpoint = endpoint_from_url(&request.url)?;
+    let channel = endpoint.connect().await.map_err(|error| {
+        GrpcError::new(
+            "reflection_connect",
+            "Não foi possível conectar ao endpoint gRPC para usar Reflection.",
+            error.to_string(),
+        )
+    })?;
+    let mut client = ServerReflectionClient::new(channel);
+    let mut tonic_request = Request::new(stream::iter([ServerReflectionRequest {
+        host: request.host.trim().to_string(),
+        message_request: Some(message_request),
+    }]));
+    *tonic_request.metadata_mut() = build_metadata(&request.metadata)?;
+
+    let response = timeout(
+        REFLECTION_TIMEOUT,
+        client.server_reflection_info(tonic_request),
+    )
+    .await
+    .map_err(|_| {
+        GrpcError::new(
+            "reflection_timeout",
+            "A consulta gRPC Reflection excedeu o timeout local.",
+            format!("Limite: {} segundos.", REFLECTION_TIMEOUT.as_secs()),
+        )
+    })?
+    .map_err(|error| {
+        GrpcError::new(
+            "reflection_call",
+            "O endpoint gRPC não aceitou a chamada de Reflection.",
+            error.to_string(),
+        )
+    })?;
+
+    let mut stream = response.into_inner();
+    let mut responses = Vec::new();
+    while let Some(response) = timeout(REFLECTION_TIMEOUT, stream.message())
+        .await
+        .map_err(|_| {
+            GrpcError::new(
+                "reflection_timeout",
+                "A resposta gRPC Reflection excedeu o timeout local.",
+                format!("Limite: {} segundos.", REFLECTION_TIMEOUT.as_secs()),
+            )
+        })?
+        .map_err(|error| {
+            GrpcError::new(
+                "reflection_receive",
+                "A resposta gRPC Reflection falhou durante o recebimento.",
+                error.to_string(),
+            )
+        })?
+    {
+        responses.push(response);
+    }
+
+    Ok(responses)
+}
+
+fn reflection_error(code: i32, message: String) -> GrpcError {
+    GrpcError::new(
+        "reflection_server",
+        "O servidor gRPC retornou um erro de Reflection.",
+        format!("Código {code}: {message}"),
+    )
+}
+
+async fn load_reflection_pool(
+    request: &GrpcReflectionRequest,
+) -> Result<DescriptorPool, GrpcError> {
+    let service_responses = reflection_exchange(
+        request,
+        MessageRequest::ListServices(request.host.trim().to_string()),
+    )
+    .await?;
+
+    let mut service_names = Vec::new();
+    for response in service_responses {
+        match response.message_response {
+            Some(MessageResponse::ListServicesResponse(list)) => {
+                service_names.extend(list.service.into_iter().map(|service| service.name));
+            }
+            Some(MessageResponse::ErrorResponse(error)) => {
+                return Err(reflection_error(error.error_code, error.error_message));
+            }
+            _ => {}
+        }
+    }
+
+    service_names.sort();
+    service_names.dedup();
+    if service_names.is_empty() {
+        return Err(GrpcError::new(
+            "reflection_empty",
+            "O endpoint não publicou services por gRPC Reflection.",
+            "A resposta list_services não contém services.",
+        ));
+    }
+    if service_names.len() > MAX_REFLECTION_SERVICES {
+        return Err(GrpcError::new(
+            "reflection_limit",
+            "O endpoint excede o limite local de services descobertos.",
+            format!(
+                "Quantidade recebida: {}, limite: {}.",
+                service_names.len(),
+                MAX_REFLECTION_SERVICES
+            ),
+        ));
+    }
+
+    let mut descriptor_payloads = Vec::new();
+    let mut descriptor_bytes = 0_usize;
+    for service_name in service_names {
+        let responses =
+            reflection_exchange(request, MessageRequest::FileContainingSymbol(service_name))
+                .await?;
+
+        for response in responses {
+            match response.message_response {
+                Some(MessageResponse::FileDescriptorResponse(files)) => {
+                    for bytes in files.file_descriptor_proto {
+                        descriptor_bytes = descriptor_bytes.saturating_add(bytes.len());
+                        if descriptor_bytes > MAX_REFLECTION_DESCRIPTOR_BYTES {
+                            return Err(GrpcError::new(
+                                "reflection_size",
+                                "Os descriptors gRPC excedem o limite local de 16 MiB.",
+                                format!("Tamanho recebido: {descriptor_bytes} bytes."),
+                            ));
+                        }
+
+                        descriptor_payloads.push(bytes);
+                    }
+                }
+                Some(MessageResponse::ErrorResponse(error)) => {
+                    return Err(reflection_error(error.error_code, error.error_message));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    descriptor_pool_from_reflection(descriptor_payloads)
+}
+
+fn descriptor_pool_from_reflection(
+    descriptor_payloads: Vec<Vec<u8>>,
+) -> Result<DescriptorPool, GrpcError> {
+    let mut descriptors = BTreeMap::new();
+    for bytes in descriptor_payloads {
+        let descriptor =
+            prost_types::FileDescriptorProto::decode(bytes.as_slice()).map_err(|error| {
+                GrpcError::new(
+                    "reflection_descriptor",
+                    "O servidor retornou um descriptor gRPC inválido.",
+                    error.to_string(),
+                )
+            })?;
+        let name = descriptor.name.clone().ok_or_else(|| {
+            GrpcError::new(
+                "reflection_descriptor",
+                "O servidor retornou um descriptor sem nome de arquivo.",
+                "FileDescriptorProto.name está ausente.",
+            )
+        })?;
+        descriptors.insert(name, descriptor);
+    }
+
+    if descriptors.is_empty() {
+        return Err(GrpcError::new(
+            "reflection_empty",
+            "O endpoint não retornou descriptors para os services descobertos.",
+            "Nenhum FileDescriptorProto foi recebido.",
+        ));
+    }
+
+    let descriptor_set = FileDescriptorSet {
+        file: descriptors.into_values().collect(),
+    };
+    DescriptorPool::decode(descriptor_set.encode_to_vec().as_slice()).map_err(|error| {
+        GrpcError::new(
+            "reflection_descriptor",
+            "Os descriptors recebidos não formam um contrato gRPC válido.",
+            error.to_string(),
+        )
     })
+}
+
+fn method_path(
+    service: &prost_reflect::ServiceDescriptor,
+    method: &prost_reflect::MethodDescriptor,
+) -> Result<PathAndQuery, GrpcError> {
+    let path = format!("/{}/{}", service.full_name(), method.name());
+    PathAndQuery::from_maybe_shared(path).map_err(|error| {
+        GrpcError::new(
+            "grpc_path",
+            "Não foi possível montar o caminho do método gRPC.",
+            error.to_string(),
+        )
+    })
+}
+
+fn decode_stream_messages(
+    method: &prost_reflect::MethodDescriptor,
+    messages: Vec<Value>,
+) -> Result<Vec<DynamicMessage>, GrpcError> {
+    if messages.is_empty() {
+        return Err(GrpcError::new(
+            "stream_body",
+            "Informe pelo menos uma mensagem JSON para o streaming.",
+            "A lista messages está vazia.",
+        ));
+    }
+    if messages.len() > MAX_STREAM_MESSAGES {
+        return Err(GrpcError::new(
+            "stream_limit",
+            "O streaming excede o limite local de 512 mensagens.",
+            format!("Quantidade recebida: {}.", messages.len()),
+        ));
+    }
+
+    messages
+        .into_iter()
+        .enumerate()
+        .map(|(index, body)| {
+            let body_json = body.to_string();
+            let mut deserializer = serde_json::Deserializer::from_str(&body_json);
+            let message = DynamicMessage::deserialize(method.input(), &mut deserializer).map_err(
+                |error| {
+                    GrpcError::new(
+                        "stream_body",
+                        format!(
+                            "A mensagem {} não corresponde ao tipo de entrada do método.",
+                            index + 1
+                        ),
+                        error.to_string(),
+                    )
+                },
+            )?;
+            deserializer.end().map_err(|error| {
+                GrpcError::new(
+                    "stream_body",
+                    format!(
+                        "A mensagem {} contém dados após o objeto principal.",
+                        index + 1
+                    ),
+                    error.to_string(),
+                )
+            })?;
+            Ok(message)
+        })
+        .collect()
+}
+
+fn dynamic_message_to_value(message: DynamicMessage) -> Result<Value, GrpcError> {
+    serde_json::to_value(message).map_err(|error| {
+        GrpcError::new(
+            "grpc_response",
+            "A resposta gRPC não pôde ser convertida para JSON.",
+            error.to_string(),
+        )
+    })
+}
+
+async fn collect_stream_messages(
+    mut stream: tonic::Streaming<DynamicMessage>,
+) -> Result<(Vec<Value>, Vec<GrpcMetadataEntry>), GrpcError> {
+    let mut messages = Vec::new();
+
+    while let Some(message) = timeout(STREAM_IDLE_TIMEOUT, stream.message())
+        .await
+        .map_err(|_| {
+            GrpcError::new(
+                "stream_timeout",
+                "O streaming gRPC ficou sem resposta além do timeout local.",
+                format!(
+                    "Limite de inatividade: {} segundos.",
+                    STREAM_IDLE_TIMEOUT.as_secs()
+                ),
+            )
+        })?
+        .map_err(|error| {
+            GrpcError::new(
+                "stream_receive",
+                "O streaming gRPC falhou durante o recebimento.",
+                error.to_string(),
+            )
+        })?
+    {
+        if messages.len() >= MAX_STREAM_MESSAGES {
+            return Err(GrpcError::new(
+                "stream_limit",
+                "O servidor excedeu o limite local de 512 mensagens recebidas.",
+                format!("Limite: {MAX_STREAM_MESSAGES} mensagens."),
+            ));
+        }
+        messages.push(dynamic_message_to_value(message)?);
+    }
+
+    let trailers = timeout(STREAM_IDLE_TIMEOUT, stream.trailers())
+        .await
+        .map_err(|_| {
+            GrpcError::new(
+                "stream_timeout",
+                "Os trailers do streaming gRPC excederam o timeout local.",
+                format!(
+                    "Limite de inatividade: {} segundos.",
+                    STREAM_IDLE_TIMEOUT.as_secs()
+                ),
+            )
+        })?
+        .map_err(|error| {
+            GrpcError::new(
+                "stream_trailers",
+                "Os trailers do streaming gRPC não puderam ser lidos.",
+                error.to_string(),
+            )
+        })?
+        .map(|metadata| serialize_metadata(&metadata))
+        .unwrap_or_default();
+
+    Ok((messages, trailers))
 }
 
 fn find_service<'a>(
@@ -338,8 +835,154 @@ fn serialize_metadata(metadata: &MetadataMap) -> Vec<GrpcMetadataEntry> {
         .collect()
 }
 
+async fn execute_stream_inner(
+    request: GrpcStreamingRequest,
+) -> Result<GrpcStreamingResponse, GrpcError> {
+    let pool = load_pool_for_source(&request.proto_path, request.reflection.as_ref()).await?;
+    let service = find_service(&pool, &request.service).ok_or_else(|| {
+        GrpcError::new(
+            "service_not_found",
+            "O serviço selecionado não existe no contrato gRPC.",
+            format!("Serviço recebido: {}", request.service),
+        )
+    })?;
+    let method = find_method(&service, &request.method).ok_or_else(|| {
+        GrpcError::new(
+            "method_not_found",
+            "O método selecionado não existe no serviço gRPC.",
+            format!("Método recebido: {}", request.method),
+        )
+    })?;
+
+    if !method.is_client_streaming() && !method.is_server_streaming() {
+        return Err(GrpcError::new(
+            "stream_method",
+            "O método selecionado é unary e deve ser executado no modo normal.",
+            format!("Método recebido: {}", method.full_name()),
+        ));
+    }
+
+    let mut inputs = decode_stream_messages(&method, request.messages)?;
+    if method.is_server_streaming() && !method.is_client_streaming() && inputs.len() != 1 {
+        return Err(GrpcError::new(
+            "stream_body",
+            "Server streaming exige exatamente uma mensagem de entrada.",
+            format!("Quantidade recebida: {}.", inputs.len()),
+        ));
+    }
+
+    let endpoint = endpoint_from_url(&request.url)?;
+    let channel = endpoint.connect().await.map_err(|error| {
+        GrpcError::new(
+            "grpc_connect",
+            "Não foi possível conectar ao endpoint gRPC.",
+            error.to_string(),
+        )
+    })?;
+
+    let metadata = build_metadata(&request.metadata)?;
+    let path = method_path(&service, &method)?;
+    let codec = DynamicGrpcCodec {
+        output: method.output(),
+    };
+    let started = Instant::now();
+    let mut grpc = Grpc::new(channel);
+
+    let (messages, response_metadata, trailers) =
+        match (method.is_client_streaming(), method.is_server_streaming()) {
+            (false, true) => {
+                let input = inputs.remove(0);
+                let mut tonic_request = Request::new(input);
+                *tonic_request.metadata_mut() = metadata;
+                let response = grpc
+                    .server_streaming(tonic_request, path, codec)
+                    .await
+                    .map_err(|error| {
+                        GrpcError::new(
+                            "stream_call",
+                            "A chamada server streaming gRPC falhou.",
+                            error.to_string(),
+                        )
+                    })?;
+                let response_metadata = serialize_metadata(response.metadata());
+                let (messages, trailers) = collect_stream_messages(response.into_inner()).await?;
+                (messages, response_metadata, trailers)
+            }
+            (true, false) => {
+                let mut tonic_request = Request::new(stream::iter(inputs));
+                *tonic_request.metadata_mut() = metadata;
+                let response = grpc
+                    .client_streaming(tonic_request, path, codec)
+                    .await
+                    .map_err(|error| {
+                        GrpcError::new(
+                            "stream_call",
+                            "A chamada client streaming gRPC falhou.",
+                            error.to_string(),
+                        )
+                    })?;
+                let response_metadata = serialize_metadata(response.metadata());
+                let message = dynamic_message_to_value(response.into_inner())?;
+                (vec![message], response_metadata, Vec::new())
+            }
+            (true, true) => {
+                let mut tonic_request = Request::new(stream::iter(inputs));
+                *tonic_request.metadata_mut() = metadata;
+                let response =
+                    grpc.streaming(tonic_request, path, codec)
+                        .await
+                        .map_err(|error| {
+                            GrpcError::new(
+                                "stream_call",
+                                "A chamada bidirectional streaming gRPC falhou.",
+                                error.to_string(),
+                            )
+                        })?;
+                let response_metadata = serialize_metadata(response.metadata());
+                let (messages, trailers) = collect_stream_messages(response.into_inner()).await?;
+                (messages, response_metadata, trailers)
+            }
+            (false, false) => unreachable!("unary methods are rejected above"),
+        };
+
+    Ok(GrpcStreamingResponse {
+        status: "OK".to_string(),
+        message_count: messages.len(),
+        messages,
+        duration_ms: started.elapsed().as_millis() as u64,
+        response_metadata,
+        trailers,
+    })
+}
+
+async fn wait_for_stream_cancellation(mut cancellation: watch::Receiver<bool>) {
+    while !*cancellation.borrow() {
+        if cancellation.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+fn stream_cancelled() -> GrpcError {
+    GrpcError::new(
+        "cancelled",
+        "O streaming gRPC foi cancelado localmente.",
+        "A execução foi interrompida antes de finalizar o recebimento.",
+    )
+}
+
+pub async fn execute_stream(
+    request: GrpcStreamingRequest,
+    cancellation: watch::Receiver<bool>,
+) -> Result<GrpcStreamingResponse, GrpcError> {
+    tokio::select! {
+        result = execute_stream_inner(request) => result,
+        _ = wait_for_stream_cancellation(cancellation) => Err(stream_cancelled()),
+    }
+}
+
 pub async fn execute_unary(request: GrpcUnaryRequest) -> Result<GrpcUnaryResponse, GrpcError> {
-    let (_, pool) = load_pool(&request.proto_path)?;
+    let pool = load_pool_for_source(&request.proto_path, request.reflection.as_ref()).await?;
     let service = find_service(&pool, &request.service).ok_or_else(|| {
         GrpcError::new(
             "service_not_found",
@@ -363,21 +1006,7 @@ pub async fn execute_unary(request: GrpcUnaryRequest) -> Result<GrpcUnaryRespons
         ));
     }
 
-    let endpoint_url = request.url.trim();
-    if !(endpoint_url.starts_with("http://") || endpoint_url.starts_with("https://")) {
-        return Err(GrpcError::new(
-            "grpc_url",
-            "Informe uma URL gRPC http:// ou https:// válida.",
-            format!("Esquema não suportado: {endpoint_url}"),
-        ));
-    }
-    let endpoint = Endpoint::from_shared(endpoint_url.to_string()).map_err(|error| {
-        GrpcError::new(
-            "grpc_url",
-            "Informe uma URL gRPC http:// ou https:// válida.",
-            error.to_string(),
-        )
-    })?;
+    let endpoint = endpoint_from_url(&request.url)?;
     let channel = endpoint.connect().await.map_err(|error| {
         GrpcError::new(
             "grpc_connect",
@@ -407,14 +1036,7 @@ pub async fn execute_unary(request: GrpcUnaryRequest) -> Result<GrpcUnaryRespons
     let metadata = build_metadata(&request.metadata)?;
     let mut tonic_request = Request::new(input);
     *tonic_request.metadata_mut() = metadata;
-    let path = format!("/{}/{}", service.full_name(), method.name());
-    let path = PathAndQuery::from_maybe_shared(path).map_err(|error| {
-        GrpcError::new(
-            "grpc_path",
-            "Não foi possível montar o caminho do método gRPC.",
-            error.to_string(),
-        )
-    })?;
+    let path = method_path(&service, &method)?;
 
     let started = Instant::now();
     let mut grpc = Grpc::new(channel);
@@ -515,6 +1137,74 @@ service PaymentService {
         assert_eq!(error.kind, "metadata_binary");
     }
 
+    #[test]
+    fn monta_pool_a_partir_de_descriptors_reflection() {
+        let path = fixture_path("reflection-pool");
+        let descriptor_set = protox::compile([path.as_path()], [path.parent().unwrap()]).unwrap();
+        let payloads = descriptor_set
+            .file
+            .into_iter()
+            .map(|file| file.encode_to_vec())
+            .collect();
+
+        let pool = descriptor_pool_from_reflection(payloads).unwrap();
+        let schema = schema_from_pool("fixture".to_string(), pool);
+
+        assert_eq!(schema.services[0].full_name, "payments.PaymentService");
+        assert_eq!(schema.services[0].methods.len(), 2);
+    }
+
+    #[test]
+    fn rejeita_descriptor_reflection_invalido() {
+        let error = descriptor_pool_from_reflection(vec![vec![0xff]]).unwrap_err();
+
+        assert_eq!(error.kind, "reflection_descriptor");
+    }
+
+    #[test]
+    fn decodifica_lista_de_mensagens_streaming() {
+        let path = fixture_path("stream-body");
+        let (_, pool) = load_pool(path.to_str().unwrap()).unwrap();
+        let service = find_service(&pool, "payments.PaymentService").unwrap();
+        let method = find_method(&service, "StreamPayments").unwrap();
+
+        let messages = decode_stream_messages(
+            &method,
+            vec![serde_json::json!({ "id": "first", "amount": 10 })],
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].get_field_by_name("id").unwrap().as_str(),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn rejeita_lista_streaming_vazia() {
+        let path = fixture_path("empty-stream-body");
+        let (_, pool) = load_pool(path.to_str().unwrap()).unwrap();
+        let service = find_service(&pool, "payments.PaymentService").unwrap();
+        let method = find_method(&service, "StreamPayments").unwrap();
+
+        let error = decode_stream_messages(&method, Vec::new()).unwrap_err();
+
+        assert_eq!(error.kind, "stream_body");
+    }
+
+    #[test]
+    fn cancela_streaming_por_run_id() {
+        let manager = GrpcStreamManager::default();
+        let mut cancellation = manager.begin("stream-test".to_string()).unwrap();
+
+        manager.cancel("stream-test").unwrap();
+
+        assert!(*cancellation.borrow_and_update());
+        manager.remove("stream-test");
+        assert!(manager.cancel("stream-test").is_err());
+    }
+
     #[tokio::test]
     async fn rejeita_streaming_antes_de_abrir_conexao() {
         let path = fixture_path("streaming");
@@ -525,6 +1215,7 @@ service PaymentService {
             method: "StreamPayments".to_string(),
             body: serde_json::json!({}),
             metadata: vec![],
+            reflection: None,
         })
         .await
         .unwrap_err();

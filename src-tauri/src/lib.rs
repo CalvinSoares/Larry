@@ -24,11 +24,13 @@ use serde_json::json;
 use tauri::{AppHandle, Manager};
 
 use execution::grpc::{
-    execute_unary, inspect_proto, GrpcError, GrpcSchema, GrpcUnaryRequest, GrpcUnaryResponse,
+    execute_stream, execute_unary, inspect_proto, inspect_reflection, GrpcError,
+    GrpcReflectionRequest, GrpcSchema, GrpcStreamManager, GrpcStreamingRequest,
+    GrpcStreamingResponse, GrpcUnaryRequest, GrpcUnaryResponse,
 };
 use execution::http::{
-    compare_http_protocols as compare_http_protocols_execution, execute_with_redactions,
-    ExecutionError, HttpProtocolComparison, HttpResponse,
+    compare_http_protocols as compare_http_protocols_execution, execute_with_cancellation,
+    ExecutionError, HttpProtocolComparison, HttpResponse, RequestExecutionManager,
 };
 use execution::profiler::{cancel_profiler, start_profiler, ProfilerManager};
 use execution::sse::{close_sse, open_sse, SseManager};
@@ -89,32 +91,33 @@ fn get_sample_request() -> RequestDefinition {
 #[tauri::command]
 async fn execute_request(
     app: AppHandle,
+    manager: tauri::State<'_, RequestExecutionManager>,
+    run_id: String,
     request: RequestDefinition,
     environment: Option<EnvironmentFile>,
 ) -> Result<HttpResponse, ExecutionError> {
+    let manager = manager.inner().clone();
+    let cancellation = manager.begin(run_id.clone())?;
     let history_request = request.clone();
     let environment_name = environment.as_ref().map(|value| value.name.as_str());
-    let resolved = match resolve_request(request, environment.as_ref()) {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            let execution_error = ExecutionError {
+    let (result, redactions) = match resolve_request(request, environment.as_ref()) {
+        Ok(resolved) => {
+            let redactions = resolved.redactions.clone();
+            let result =
+                execute_with_cancellation(resolved.request, &redactions, cancellation).await;
+            (result, redactions)
+        }
+        Err(error) => (
+            Err(ExecutionError {
                 kind: error.kind,
                 message: error.message,
                 diagnostic: None,
-            };
-            record_history(
-                &app,
-                &history_request,
-                environment_name,
-                &Err(execution_error.clone()),
-                &[],
-            );
-            return Err(execution_error);
-        }
+            }),
+            Vec::new(),
+        ),
     };
 
-    let redactions = resolved.redactions.clone();
-    let result = execute_with_redactions(resolved.request, &redactions).await;
+    manager.remove(&run_id);
     record_history(
         &app,
         &history_request,
@@ -123,6 +126,14 @@ async fn execute_request(
         &redactions,
     );
     result
+}
+
+#[tauri::command]
+fn cancel_request(
+    manager: tauri::State<'_, RequestExecutionManager>,
+    run_id: String,
+) -> Result<(), ExecutionError> {
+    manager.cancel(&run_id)
 }
 
 #[tauri::command]
@@ -256,13 +267,41 @@ fn inspect_grpc_proto(path: String) -> Result<GrpcSchema, GrpcError> {
 }
 
 #[tauri::command]
+async fn inspect_grpc_reflection(request: GrpcReflectionRequest) -> Result<GrpcSchema, GrpcError> {
+    inspect_reflection(request).await
+}
+
+#[tauri::command]
 async fn execute_grpc_unary(request: GrpcUnaryRequest) -> Result<GrpcUnaryResponse, GrpcError> {
     execute_unary(request).await
+}
+
+#[tauri::command]
+async fn execute_grpc_stream(
+    manager: tauri::State<'_, GrpcStreamManager>,
+    run_id: String,
+    request: GrpcStreamingRequest,
+) -> Result<GrpcStreamingResponse, GrpcError> {
+    let manager = manager.inner().clone();
+    let cancellation = manager.begin(run_id.clone())?;
+    let result = execute_stream(request, cancellation).await;
+    manager.remove(&run_id);
+    result
+}
+
+#[tauri::command]
+fn cancel_grpc_stream(
+    manager: tauri::State<'_, GrpcStreamManager>,
+    run_id: String,
+) -> Result<(), GrpcError> {
+    manager.cancel(&run_id)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(RequestExecutionManager::default())
+        .manage(GrpcStreamManager::default())
         .manage(ProfilerManager::default())
         .manage(SseManager::default())
         .manage(WebSocketManager::default())
@@ -272,6 +311,7 @@ pub fn run() {
             get_app_info,
             get_sample_request,
             execute_request,
+            cancel_request,
             compare_http_protocols,
             start_profiler,
             cancel_profiler,
@@ -288,7 +328,10 @@ pub fn run() {
             preview_postman_collection,
             parse_curl_request,
             inspect_grpc_proto,
+            inspect_grpc_reflection,
             execute_grpc_unary,
+            execute_grpc_stream,
+            cancel_grpc_stream,
             open_sse,
             close_sse,
             open_websocket,

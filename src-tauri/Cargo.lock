@@ -2230,6 +2230,7 @@ dependencies = [
  "keyring",
  "prost",
  "prost-reflect",
+ "prost-types",
  "protox",
  "reqwest 0.12.28",
  "rusqlite",
@@ -2243,6 +2244,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tonic",
+ "tonic-reflection",
 ]
 
 [[package]]
@@ -4908,6 +4910,28 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "tonic-prost"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
+dependencies = [
+ "bytes",
+ "prost",
+ "tonic",
+]
+
+[[package]]
+name = "tonic-reflection"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acccd136a4bf19810a1fde9c74edc6129b42a66b44d0c1c8aaa67aeb49a146a7"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
 ]
 
 [[package]]
