@@ -280,4 +280,45 @@ mod tests {
 
         fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn rejeita_collection_yaml_invalido() {
+        let path = std::env::temp_dir().join(format!(
+            "larry-test-{}-invalid-collection.yaml",
+            std::process::id()
+        ));
+        fs::write(&path, "schemaVersion: [incompleto").unwrap();
+
+        let error = load_collection(path.to_str().unwrap()).unwrap_err();
+
+        assert_eq!(error.kind, "parse");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejeita_collection_ausente() {
+        let path = std::env::temp_dir().join(format!(
+            "larry-test-{}-missing-collection.yaml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        let error = load_collection(path.to_str().unwrap()).unwrap_err();
+
+        assert_eq!(error.kind, "metadata");
+    }
+
+    #[test]
+    fn rejeita_collection_acima_do_limite() {
+        let path = std::env::temp_dir().join(format!(
+            "larry-test-{}-large-collection.yaml",
+            std::process::id()
+        ));
+        fs::write(&path, vec![b'x'; MAX_COLLECTION_BYTES as usize + 1]).unwrap();
+
+        let error = load_collection(path.to_str().unwrap()).unwrap_err();
+
+        assert_eq!(error.kind, "collection_too_large");
+        fs::remove_file(path).unwrap();
+    }
 }

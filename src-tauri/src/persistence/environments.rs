@@ -173,4 +173,45 @@ mod tests {
         );
         fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn rejeita_environment_yaml_invalido() {
+        let path = std::env::temp_dir().join(format!(
+            "larry-test-{}-invalid-environment.yaml",
+            std::process::id()
+        ));
+        fs::write(&path, "schemaVersion: [incompleto").unwrap();
+
+        let error = load_environment(path.to_str().unwrap()).unwrap_err();
+
+        assert_eq!(error.kind, "parse");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejeita_environment_ausente() {
+        let path = std::env::temp_dir().join(format!(
+            "larry-test-{}-missing-environment.yaml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        let error = load_environment(path.to_str().unwrap()).unwrap_err();
+
+        assert_eq!(error.kind, "metadata");
+    }
+
+    #[test]
+    fn rejeita_environment_acima_do_limite() {
+        let path = std::env::temp_dir().join(format!(
+            "larry-test-{}-large-environment.yaml",
+            std::process::id()
+        ));
+        fs::write(&path, vec![b'x'; MAX_ENVIRONMENT_BYTES as usize + 1]).unwrap();
+
+        let error = load_environment(path.to_str().unwrap()).unwrap_err();
+
+        assert_eq!(error.kind, "environment_too_large");
+        fs::remove_file(path).unwrap();
+    }
 }

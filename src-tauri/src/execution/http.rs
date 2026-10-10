@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use reqwest::{header, Client, Method, Url};
 use serde::{Deserialize, Serialize};
 use tokio::net::lookup_host;
+use tokio::sync::watch;
 use tokio::time::timeout;
 
 use crate::domain::request::{
@@ -133,6 +136,78 @@ impl ExecutionError {
         self.diagnostic = Some(diagnostic);
         self
     }
+
+    fn cancelled() -> Self {
+        Self::new("cancelled", "A requisição foi cancelada localmente.").with_diagnostic(
+            diagnostic(
+                "execution",
+                "cancelled",
+                "A execução foi interrompida antes de produzir uma resposta.",
+                "O usuário sinalizou o cancelamento da operação local.",
+            ),
+        )
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct RequestExecutionManager {
+    runs: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+}
+
+impl RequestExecutionManager {
+    pub fn begin(&self, run_id: String) -> Result<watch::Receiver<bool>, ExecutionError> {
+        let (sender, receiver) = watch::channel(false);
+        let mut runs = self.runs.lock().map_err(|_| {
+            ExecutionError::new(
+                "request_manager",
+                "Não foi possível acessar o controle das requests em execução.",
+            )
+        })?;
+
+        if runs.contains_key(&run_id) {
+            return Err(ExecutionError::new(
+                "request_already_running",
+                "Já existe uma request local com este identificador em execução.",
+            ));
+        }
+
+        runs.insert(run_id, sender);
+
+        Ok(receiver)
+    }
+
+    pub fn cancel(&self, run_id: &str) -> Result<(), ExecutionError> {
+        let sender = self
+            .runs
+            .lock()
+            .map_err(|_| {
+                ExecutionError::new(
+                    "request_manager",
+                    "Não foi possível acessar o controle das requests em execução.",
+                )
+            })?
+            .get(run_id)
+            .cloned()
+            .ok_or_else(|| {
+                ExecutionError::new(
+                    "request_not_found",
+                    "A request não está mais em execução ou já foi finalizada.",
+                )
+            })?;
+
+        sender.send(true).map_err(|_| {
+            ExecutionError::new(
+                "request_cancel",
+                "Não foi possível sinalizar o cancelamento da request.",
+            )
+        })
+    }
+
+    pub fn remove(&self, run_id: &str) {
+        if let Ok(mut runs) = self.runs.lock() {
+            runs.remove(run_id);
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -147,17 +222,45 @@ pub async fn execute_with_redactions(
     execute_with_protocol(request, redactions, HttpProtocol::Auto).await
 }
 
+pub async fn execute_with_cancellation(
+    request: RequestDefinition,
+    redactions: &[String],
+    cancellation: watch::Receiver<bool>,
+) -> Result<HttpResponse, ExecutionError> {
+    tokio::select! {
+        result = execute_with_redactions(request, redactions) => result,
+        _ = wait_for_cancellation(cancellation) => Err(ExecutionError::cancelled()),
+    }
+}
+
+async fn wait_for_cancellation(mut receiver: watch::Receiver<bool>) {
+    if *receiver.borrow() {
+        return;
+    }
+
+    let _ = receiver.changed().await;
+}
+
 pub async fn execute_with_protocol(
     request: RequestDefinition,
     redactions: &[String],
     protocol: HttpProtocol,
 ) -> Result<HttpResponse, ExecutionError> {
+    execute_with_protocol_timeout(request, redactions, protocol, REQUEST_TIMEOUT).await
+}
+
+async fn execute_with_protocol_timeout(
+    request: RequestDefinition,
+    redactions: &[String],
+    protocol: HttpProtocol,
+    request_timeout: Duration,
+) -> Result<HttpResponse, ExecutionError> {
     let parsed_url =
         validate_request(&request).map_err(|error| redact_execution_error(error, redactions))?;
     let trace_started = Instant::now();
-    let dns = resolve_dns(&parsed_url, redactions).await?;
+    let dns = resolve_dns(&parsed_url, redactions, request_timeout).await?;
     let method = map_method(&request.method);
-    let client_builder = Client::builder().timeout(REQUEST_TIMEOUT);
+    let client_builder = Client::builder().timeout(request_timeout);
     let client_builder = match protocol {
         HttpProtocol::Auto => client_builder,
         HttpProtocol::Http1 => client_builder.http1_only(),
@@ -609,7 +712,11 @@ struct DnsResolution {
     addresses: Vec<String>,
 }
 
-async fn resolve_dns(url: &Url, redactions: &[String]) -> Result<DnsResolution, ExecutionError> {
+async fn resolve_dns(
+    url: &Url,
+    redactions: &[String],
+    request_timeout: Duration,
+) -> Result<DnsResolution, ExecutionError> {
     let host = url.host_str().ok_or_else(|| {
         ExecutionError::new("dns", "A URL não possui host para resolver.").with_diagnostic(
             diagnostic(
@@ -623,7 +730,7 @@ async fn resolve_dns(url: &Url, redactions: &[String]) -> Result<DnsResolution, 
     let port = url.port_or_known_default().unwrap_or(443);
     let started_at = Instant::now();
 
-    let resolution = timeout(REQUEST_TIMEOUT, lookup_host((host, port)))
+    let resolution = timeout(request_timeout, lookup_host((host, port)))
         .await
         .map_err(|_| {
             ExecutionError::new("dns_timeout", "A resolução DNS excedeu o timeout local.")
@@ -784,6 +891,13 @@ fn redact_execution_error(mut error: ExecutionError, redactions: &[String]) -> E
 }
 
 async fn read_response_body(response: reqwest::Response) -> Result<Vec<u8>, ExecutionError> {
+    read_response_body_with_limit(response, MAX_RESPONSE_BYTES).await
+}
+
+async fn read_response_body_with_limit(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ExecutionError> {
     let mut body = Vec::new();
     let mut response = response;
 
@@ -792,13 +906,15 @@ async fn read_response_body(response: reqwest::Response) -> Result<Vec<u8>, Exec
         .await
         .map_err(|error| ExecutionError::new("response_body", error.to_string()))?
     {
-        if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+        if body.len() + chunk.len() > max_bytes {
+            let limit = if max_bytes == MAX_RESPONSE_BYTES {
+                format!("{} MiB", MAX_RESPONSE_BYTES / 1024 / 1024)
+            } else {
+                format!("{} bytes", max_bytes)
+            };
             return Err(ExecutionError::new(
                 "response_too_large",
-                format!(
-                    "A resposta excede o limite local de {} MiB.",
-                    MAX_RESPONSE_BYTES / 1024 / 1024
-                ),
+                format!("A resposta excede o limite local de {limit}."),
             ));
         }
 
@@ -812,6 +928,8 @@ async fn read_response_body(response: reqwest::Response) -> Result<Vec<u8>, Exec
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use super::*;
     use crate::domain::request::{MultipartFile, RequestAuth};
@@ -831,6 +949,37 @@ mod tests {
         }
     }
 
+    fn spawn_response_server(
+        status: u16,
+        body: &'static str,
+        delay: Duration,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_buffer = [0_u8; 4096];
+            let _ = stream.read(&mut request_buffer);
+            std::thread::sleep(delay);
+
+            let reason = match status {
+                200 => "OK",
+                401 => "Unauthorized",
+                403 => "Forbidden",
+                500 => "Internal Server Error",
+                _ => "Fixture Response",
+            };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+
+        (format!("http://127.0.0.1:{port}/fixture"), server)
+    }
+
     #[test]
     fn serializa_protocolos_de_comparacao() {
         assert_eq!(
@@ -845,6 +994,158 @@ mod tests {
             serde_json::to_string(&HttpProtocol::Http2).unwrap(),
             "\"http2\""
         );
+    }
+
+    #[test]
+    fn bloqueia_identificador_de_request_duplicado() {
+        let manager = RequestExecutionManager::default();
+
+        assert!(manager.begin("run-1".to_string()).is_ok());
+
+        let error = manager.begin("run-1".to_string()).unwrap_err();
+
+        assert_eq!(error.kind, "request_already_running");
+    }
+
+    #[tokio::test]
+    async fn cancela_request_antes_do_inicio_da_execucao() {
+        let request = request("http://127.0.0.1:1/health");
+        let (_sender, receiver) = tokio::sync::watch::channel(true);
+
+        let error = execute_with_cancellation(request, &[], receiver)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, "cancelled");
+        assert_eq!(error.diagnostic.unwrap().layer, "execution");
+    }
+
+    #[tokio::test]
+    async fn cancela_request_durante_o_transporte() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_sender, accepted_receiver) = mpsc::channel();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            accepted_sender.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = stream.write_all(
+                concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Length: 2\r\n",
+                    "Connection: close\r\n",
+                    "\r\n",
+                    "ok"
+                )
+                .as_bytes(),
+            );
+        });
+
+        let manager = RequestExecutionManager::default();
+        let run_id = "run-transport".to_string();
+        let cancellation = manager.begin(run_id.clone()).unwrap();
+        let execution = tokio::spawn(execute_with_cancellation(
+            request(&format!("http://127.0.0.1:{port}/slow")),
+            &[],
+            cancellation,
+        ));
+
+        tokio::task::spawn_blocking(move || {
+            accepted_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("o fixture deve aceitar a conexão");
+        })
+        .await
+        .unwrap();
+
+        manager.cancel(&run_id).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(1), execution)
+            .await
+            .expect("o cancelamento deve encerrar a execução")
+            .unwrap()
+            .unwrap_err();
+
+        manager.remove(&run_id);
+        server.join().unwrap();
+
+        assert_eq!(error.kind, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn classifica_respostas_de_aplicacao_com_fixture_local() {
+        for (status, expected_kind) in [
+            (401, "authentication"),
+            (403, "authorization"),
+            (500, "server_error"),
+        ] {
+            let (url, server) = spawn_response_server(status, "failure", Duration::ZERO);
+            let response = execute(request(&url)).await.unwrap();
+
+            server.join().unwrap();
+
+            assert_eq!(response.status, status);
+            assert_eq!(response.diagnostics[0].layer, "application");
+            assert_eq!(response.diagnostics[0].kind, expected_kind);
+            assert_eq!(response.diagnostics[0].provenance, "observed");
+        }
+    }
+
+    #[tokio::test]
+    async fn classifica_conexao_recusada() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let error = execute(request(&format!("http://127.0.0.1:{port}/refused")))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, "connection");
+        assert_eq!(error.diagnostic.unwrap().layer, "transport");
+    }
+
+    #[tokio::test]
+    async fn classifica_timeout_com_limite_de_fixture() {
+        let (url, server) = spawn_response_server(200, "slow", Duration::from_millis(200));
+        let error = execute_with_protocol_timeout(
+            request(&url),
+            &[],
+            HttpProtocol::Auto,
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+
+        server.join().unwrap();
+
+        assert_eq!(error.kind, "timeout");
+        assert_eq!(error.diagnostic.unwrap().layer, "transport");
+    }
+
+    #[tokio::test]
+    async fn rejeita_response_acima_do_limite_configurado() {
+        let (url, server) = spawn_response_server(200, "large", Duration::ZERO);
+        let response = reqwest::Client::new().get(url).send().await.unwrap();
+
+        let error = read_response_body_with_limit(response, 4)
+            .await
+            .unwrap_err();
+
+        server.join().unwrap();
+
+        assert_eq!(error.kind, "response_too_large");
+        assert!(error.message.contains("4 bytes"));
+    }
+
+    #[tokio::test]
+    async fn classifica_falha_de_dns_com_dominio_reservado() {
+        let error = execute(request("http://larry-test.invalid/health"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.kind.as_str(), "dns" | "dns_timeout"));
+        assert_eq!(error.diagnostic.unwrap().layer, "dns");
     }
 
     #[test]

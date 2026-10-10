@@ -40,14 +40,8 @@ pub fn get_secret(secret_ref: &str) -> Result<String, SecretStoreError> {
     let entry = keyring::Entry::new(SERVICE_NAME, secret_ref)
         .map_err(|error| SecretStoreError::new("credential_store", error.to_string()))?;
     entry.get_password().map_err(|error| {
-        let kind = if matches!(error, keyring::Error::NoEntry) {
-            "missing_secret"
-        } else {
-            "credential_store"
-        };
-
         SecretStoreError::new(
-            kind,
+            keyring_error_kind(&error),
             "Não foi possível obter o secret do armazenamento seguro.",
         )
     })
@@ -82,6 +76,14 @@ fn validate_secret_ref(secret_ref: &str) -> Result<(), SecretStoreError> {
     Ok(())
 }
 
+fn keyring_error_kind(error: &keyring::Error) -> &'static str {
+    if matches!(error, keyring::Error::NoEntry) {
+        "missing_secret"
+    } else {
+        "credential_store"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +98,16 @@ mod tests {
     fn rejeita_secret_vazio() {
         let error = set_secret("payments.token", "").unwrap_err();
         assert_eq!(error.kind, "empty_secret");
+    }
+
+    #[test]
+    fn classifica_secret_ausente_sem_expor_valor() {
+        let error = SecretStoreError::new(
+            keyring_error_kind(&keyring::Error::NoEntry),
+            "Não foi possível obter o secret do armazenamento seguro.",
+        );
+
+        assert_eq!(error.kind, "missing_secret");
+        assert!(!error.message.contains("token"));
     }
 }
