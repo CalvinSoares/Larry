@@ -50,12 +50,14 @@ const assertionTypeOptions: CustomSelectOption[] = [
 const props = defineProps<{
   request: RequestDefinition;
   isExecuting: boolean;
+  isCancelling: boolean;
   resetToken: number;
 }>();
 
 const emit = defineEmits<{
   (event: "update:request", request: RequestDefinition): void;
   (event: "submit"): void;
+  (event: "cancel"): void;
   (event: "reset"): void;
   (event: "validation-error", message: string): void;
 }>();
@@ -445,6 +447,11 @@ function updateAssertionField(index: number, field: "expected" | "name" | "value
 }
 
 function handleSubmit() {
+  if (props.isExecuting) {
+    emit("cancel");
+    return;
+  }
+
   if (bodyError.value) {
     activeTab.value = "body";
     emit("validation-error", bodyError.value);
@@ -564,8 +571,12 @@ onMounted(syncBodyEditor);
         @paste="handleUrlPaste"
       />
 
-      <button class="primary-action" type="submit" :disabled="props.isExecuting || Boolean(bodyError)">
-        {{ props.isExecuting ? "Enviando..." : "Enviar" }}
+      <button
+        class="primary-action"
+        type="submit"
+        :disabled="props.isExecuting && props.isCancelling || !props.isExecuting && Boolean(bodyError)"
+      >
+        {{ props.isExecuting ? (props.isCancelling ? "Cancelando..." : "Cancelar") : "Enviar" }}
       </button>
     </div>
 

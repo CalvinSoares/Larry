@@ -11,6 +11,7 @@ import WelcomeModal from "./features/onboarding/WelcomeModal.vue";
 import PostmanImportModal from "./features/onboarding/PostmanImportModal.vue";
 import CurlImportModal from "./features/onboarding/CurlImportModal.vue";
 import {
+  cancelRequest,
   executeRequest,
   getHistoryEntry,
   getAppInfo,
@@ -40,6 +41,8 @@ const isCollectionDirty = ref(true);
 const activeRequestId = ref("");
 const response = ref<HttpResponse | null>(null);
 const isExecuting = ref(false);
+const isCancelling = ref(false);
+const activeRunId = ref("");
 const errorMessage = ref("");
 const editorError = ref("");
 const resetToken = ref(0);
@@ -516,17 +519,37 @@ async function runRequest() {
     return;
   }
 
+  const runId = `request-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  activeRunId.value = runId;
   isExecuting.value = true;
+  isCancelling.value = false;
   editorError.value = "";
   response.value = null;
 
   try {
-    response.value = await executeRequest(requestDraft.value, activeEnvironment.value);
+    response.value = await executeRequest(requestDraft.value, activeEnvironment.value, runId);
   } catch (error) {
     editorError.value = formatIpcError(error);
   } finally {
     isExecuting.value = false;
+    isCancelling.value = false;
+    activeRunId.value = "";
     await refreshHistory();
+  }
+}
+
+async function cancelRequestExecution() {
+  if (!activeRunId.value || isCancelling.value) {
+    return;
+  }
+
+  isCancelling.value = true;
+
+  try {
+    await cancelRequest(activeRunId.value);
+  } catch (error) {
+    isCancelling.value = false;
+    editorError.value = formatIpcError(error);
   }
 }
 
@@ -625,9 +648,11 @@ onMounted(async () => {
         <RequestEditor
           :request="requestDraft"
           :is-executing="isExecuting"
+          :is-cancelling="isCancelling"
           :reset-token="resetToken"
           @update:request="updateRequest"
           @submit="runRequest"
+          @cancel="cancelRequestExecution"
           @reset="resetRequest"
           @validation-error="editorError = $event"
         />
